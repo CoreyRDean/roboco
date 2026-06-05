@@ -66,20 +66,7 @@ Environment variables for RoboCo (prefix: `ROBOCO_`).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ROBOCO_SECRET_KEY` | (required) | JWT signing key (32+ chars) |
-| `ROBOCO_ACCESS_TOKEN_EXPIRE_MINUTES` | `1440` | Token expiry (24 hours) |
-
-## Logging
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ROBOCO_LOG_LEVEL` | `INFO` | DEBUG/INFO/WARNING/ERROR/CRITICAL |
-| `ROBOCO_LOG_FORMAT` | `json` | json or console |
-
-## Sessions
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ROBOCO_SESSION_DEFAULT_TIMEOUT_SECONDS` | `300` | Session timeout |
-| `ROBOCO_SESSION_MAX_MESSAGE_COUNT` | `100` | Max messages per session |
-| `ROBOCO_MESSAGE_MAX_LENGTH` | `10000` | Max message length |
+| `ROBOCO_ENCRYPTION_KEY` | (required) | Fernet key that encrypts secrets at rest (e.g. per-project git tokens). Generate with `Fernet.generate_key()`. |
+| `ROBOCO_AGENT_AUTH_SECRET` | (required) | HMAC secret the orchestrator signs each agent's `X-Agent-Token` with. |
+| `ROBOCO_AGENT_AUTH_REQUIRED` | `false` | When `true`, every request must carry a valid agent token (secure mode). |
+| `ROBOCO_PANEL_AGENT_TOKEN` | (unset) | The control panel's CEO token, injected by nginx in secure mode. Get it with `make panel-token`. |
