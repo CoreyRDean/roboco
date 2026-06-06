@@ -10,6 +10,10 @@ the control panel.
 > The panel is your one window into the company. Every task, agent, message,
 > journal, and pull request is live in front of you.
 
+**Prefer video?** A [full screen-recording of the panel](videos/panel-full-walkthrough.mov)
+walks through every page and detail end-to-end — useful as a first tour before
+diving into the screenshots below.
+
 ![The RoboCo Command Center: per-cell health, the CEO approval queue, live metrics, auditor alerts, and recent activity.](images/overview_dashboard.png)
 
 *The **Command Center** — a glance tells you how each cell is doing, what's
