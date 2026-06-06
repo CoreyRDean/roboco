@@ -53,6 +53,13 @@ Marketing turn a loose request into a concrete spec, with the acceptance criteri
 that define what "finished" actually means. The Auditor watches the whole time
 but never interferes.
 
+![The CEO's task-definition form: the title, description, and acceptance criteria that start a task.](images/task_definition_1.png)
+
+![The same task-definition form, scrolled or scrolled-onto the acceptance criteria and submit step.](images/task_definition_2.png)
+
+*Filing the brief — title, description, and the must-haves captured up front so
+nothing is implicit and nothing is lost.*
+
 ![A Board review session: the Product Owner writing out requirements and acceptance criteria for a task.](images/chat_session.png)
 
 *The Product Owner working a task over — pinning down the requirements and the
@@ -112,10 +119,6 @@ along with it:
 
 *One finished unit — branch, pull request, commits, and docs all attached. This
 is the thing that travels up the merge chain.*
-
-![A cell task's Git view: branch, commits, and the pull request opened against the Main PM integration branch.](images/task_definition_1.png)
-
-![The Main PM integration branch showing each cell's PR landing in turn, with the integration PR ready to open against `main`.](images/task_definition_2.png)
 
 ### 6 · The last call is yours
 
