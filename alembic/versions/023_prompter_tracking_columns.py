@@ -5,7 +5,7 @@ Adds `source` (varchar 50, default 'manual') and `confirmed_by_human`
 feature. Prompter-originated tasks require human confirmation before entering
 the workflow.
 
-Revision ID: 023_add_prompter_tracking_columns
+Revision ID: 023_prompter_tracking_columns
 Revises: 022_default_branch_master
 Create Date: 2026-06-07
 """
@@ -15,7 +15,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "023_add_prompter_tracking_columns"
+revision = "023_prompter_tracking_columns"
 down_revision = "022_default_branch_master"
 branch_labels = None
 depends_on = None

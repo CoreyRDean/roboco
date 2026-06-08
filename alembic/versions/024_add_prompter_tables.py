@@ -9,7 +9,7 @@ feature with DB-persisted conversation history and task draft tracking:
   links to a real Task once the human confirms via /confirm endpoint
 
 Revision ID: 024_add_prompter_tables
-Revises: 023_add_prompter_tracking_columns
+Revises: 023_prompter_tracking_columns
 Create Date: 2026-06-07
 """
 
@@ -20,7 +20,7 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 revision = "024_add_prompter_tables"
-down_revision = "023_add_prompter_tracking_columns"
+down_revision = "023_prompter_tracking_columns"
 branch_labels = None
 depends_on = None
 
