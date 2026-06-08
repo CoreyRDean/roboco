@@ -1025,7 +1025,7 @@ async def test_escalate_to_ceo_matches_spec(role: str, status: str) -> None:
 
       - role in {main_pm, product_owner, head_marketing},
       - composed ``escalate_to_ceo`` action's source_status
-        (AWAITING_PM_REVIEW only).
+        (AWAITING_PM_REVIEW or BLOCKED).
 
     The verb body keeps the journal:decision preflight (the spec doesn't
     model journal side effects); satisfied here so the spec gate is the

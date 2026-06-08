@@ -457,6 +457,16 @@
       "target": "pending"
     },
     {
+      "action": "escalate_to_ceo",
+      "roles": [
+        "head_marketing",
+        "main_pm",
+        "product_owner"
+      ],
+      "source": "blocked",
+      "target": "awaiting_ceo_approval"
+    },
+    {
       "action": "cancel",
       "roles": [
         "cell_pm",

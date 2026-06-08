@@ -242,6 +242,8 @@ def test_status_transitions_includes_ceo_paths() -> None:
     ) in sources
     assert (spec.Status.AWAITING_CEO_APPROVAL, spec.Status.COMPLETED) in sources
     assert (spec.Status.AWAITING_CEO_APPROVAL, spec.Status.NEEDS_REVISION) in sources
+    # A blocked task the PM cannot resolve can also be surfaced to the CEO.
+    assert (spec.Status.BLOCKED, spec.Status.AWAITING_CEO_APPROVAL) in sources
 
 
 def test_status_transitions_includes_block_pause_paths() -> None:
@@ -307,19 +309,34 @@ def test_status_transitions_role_constraints_match_canon() -> None:
     assert by_pair[
         (spec.Status.AWAITING_PM_REVIEW, spec.Status.COMPLETED, "complete")
     ] == frozenset({spec.Role.CELL_PM, spec.Role.MAIN_PM})
-    # escalate_to_ceo: main_pm + product_owner + head_marketing
-    assert by_pair[
-        (
-            spec.Status.AWAITING_PM_REVIEW,
-            spec.Status.AWAITING_CEO_APPROVAL,
-            "escalate_to_ceo",
-        )
-    ] == frozenset(
+    # escalate_to_ceo: main_pm + product_owner + head_marketing — from a
+    # completed review and from a blocked task, same role gate.
+    escalate_roles = frozenset(
         {
             spec.Role.MAIN_PM,
             spec.Role.PRODUCT_OWNER,
             spec.Role.HEAD_MARKETING,
         }
+    )
+    assert (
+        by_pair[
+            (
+                spec.Status.AWAITING_PM_REVIEW,
+                spec.Status.AWAITING_CEO_APPROVAL,
+                "escalate_to_ceo",
+            )
+        ]
+        == escalate_roles
+    )
+    assert (
+        by_pair[
+            (
+                spec.Status.BLOCKED,
+                spec.Status.AWAITING_CEO_APPROVAL,
+                "escalate_to_ceo",
+            )
+        ]
+        == escalate_roles
     )
     # CEO actions: CEO only
     assert by_pair[

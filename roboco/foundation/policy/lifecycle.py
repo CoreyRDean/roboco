@@ -285,6 +285,13 @@ _STATUS_TRANSITIONS: tuple[StatusTransition, ...] = (
         "escalate_to_ceo",
         frozenset({Role.MAIN_PM, Role.PRODUCT_OWNER, Role.HEAD_MARKETING}),
     ),
+    # A blocked task the PM cannot resolve can be surfaced to the CEO directly.
+    StatusTransition(
+        Status.BLOCKED,
+        Status.AWAITING_CEO_APPROVAL,
+        "escalate_to_ceo",
+        frozenset({Role.MAIN_PM, Role.PRODUCT_OWNER, Role.HEAD_MARKETING}),
+    ),
     # CEO approve / reject
     StatusTransition(
         Status.AWAITING_CEO_APPROVAL,
@@ -510,7 +517,10 @@ _ATOMIC_ACTIONS: dict[str, ActionSpec] = {
                 Role.HEAD_MARKETING,
             }
         ),
-        source_statuses=frozenset({Status.AWAITING_PM_REVIEW}),
+        # Reachable from a completed review (the normal sign-off escalation) AND
+        # from a blocked task the PM cannot resolve — so a wedged task has a
+        # clean verb to a human decision instead of only the admin override.
+        source_statuses=frozenset({Status.AWAITING_PM_REVIEW, Status.BLOCKED}),
         target_status=Status.AWAITING_CEO_APPROVAL,
         allowed_task_types=None,
         preconditions=(),

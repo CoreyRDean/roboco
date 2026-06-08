@@ -40,6 +40,11 @@ from roboco.models.base import Team
 
 logger = get_logger(__name__)
 
+# A healthy loose ref file holds either an object id (sha1 = 40 hex, sha256 = 64
+# hex) or a symbolic ref ("ref: refs/..."). Anything else is debris — used to
+# detect broken loose refs left by interrupted recovery before a fetch.
+_REF_OBJECT_ID_RE = re.compile(r"\A[0-9a-f]{40}\Z|\A[0-9a-f]{64}\Z")
+
 # Agent container runs the `agent` user created in agent-base.Dockerfile.
 # Debian's `useradd -m` defaults to uid 1000 when that uid is free.
 # Overridable via env so operators can customize if they rebuild agent-base
@@ -417,6 +422,44 @@ class WorkspaceService:
         )
 
     @staticmethod
+    def _prune_broken_refs(workspace: Path) -> None:
+        """Drop debris loose refs before a fetch. Best-effort; never raises.
+
+        Interrupted hard-stop recovery can leave ``.bak`` ref debris and
+        truncated/garbage loose-ref files under ``.git/refs``. Git tolerates
+        them but emits a "ignoring broken ref" warning on every ref-walking
+        operation (fetch included), which pollutes logs and can wedge ref
+        enumeration. Remove ``.bak`` debris and any loose ref whose contents are
+        neither an object id nor a symref. Reads files only — no per-ref
+        subprocess — so it stays cheap even on a many-branch monorepo clone.
+        """
+        refs_dir = workspace / ".git" / "refs"
+        if not refs_dir.is_dir():
+            return
+        try:
+            for ref_file in refs_dir.rglob("*"):
+                if not ref_file.is_file():
+                    continue
+                if ref_file.suffix == ".bak":
+                    ref_file.unlink(missing_ok=True)
+                    continue
+                content = ref_file.read_text(encoding="utf-8", errors="replace").strip()
+                if not (
+                    _REF_OBJECT_ID_RE.match(content) or content.startswith("ref: ")
+                ):
+                    logger.debug(
+                        "ensure_workspace: pruning broken loose ref",
+                        ref=str(ref_file),
+                    )
+                    ref_file.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning(
+                "ensure_workspace: broken-ref prune failed",
+                workspace=str(workspace),
+                error=str(exc),
+            )
+
+    @staticmethod
     async def _fetch_origin_best_effort(workspace: Path, project_slug: str) -> None:
         """Refresh `origin`'s refs into a healthy clone. Never raises.
 
@@ -603,6 +646,10 @@ class WorkspaceService:
                 # the first call always runs the fetch regardless of clock value.
                 last_fetch = self._fetch_cache.get(str(workspace), -math.inf)
                 if force or (now - last_fetch) >= _FETCH_CACHE_TTL_SECONDS:
+                    # Repair broken-ref debris first so the fetch (and the
+                    # agent's later `git diff/log origin/...`) doesn't trip on a
+                    # ref left corrupt by an interrupted recovery.
+                    await asyncio.to_thread(self._prune_broken_refs, workspace)
                     await self._fetch_origin_best_effort(workspace, project_slug)
                     self._fetch_cache[str(workspace)] = _monotonic()
                 # Re-chown so the agent user can still write into .git

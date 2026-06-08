@@ -17,6 +17,7 @@
 | awaiting_qa | needs_revision | qa_fail | qa |
 | backlog | cancelled | cancel | cell_pm, ceo, main_pm |
 | backlog | pending | activate | any |
+| blocked | awaiting_ceo_approval | escalate_to_ceo | head_marketing, main_pm, product_owner |
 | blocked | cancelled | cancel | cell_pm, ceo, main_pm |
 | blocked | in_progress | unblock | any |
 | blocked | pending | unblock | any |

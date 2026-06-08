@@ -78,11 +78,17 @@ fi
 
 # Optional full clean-slate (opt-in via FULL_RESET=1): wipe everything under the
 # roboco data root EXCEPT the persistent service stores (ollama / postgres /
-# redis), and clear any persisted agent Claude session state that would
+# redis), and clear the persisted agent Claude session state that would
 # otherwise replay across runs. Default OFF — the workspace git-reset below is
 # the usual path. The data root is resolved from the workspaces root's parent
-# (or ROBOCO_DATA_ROOT); the Claude-state paths come from ROBOCO_CLAUDE_STATE_DIRS
-# (space-separated) so nothing is guessed.
+# (or ROBOCO_DATA_ROOT).
+#
+# Claude session state lives under the mounted Claude home (ROBOCO_HOST_CLAUDE_DIR,
+# the same dir the agent containers mount). When ROBOCO_CLAUDE_STATE_DIRS is unset
+# we clear the conversation-transcript and todo subdirs of that home — the state
+# that replays across runs — and NEVER the home root itself, which holds
+# `.credentials.json` (wiping it would log the host out of Claude). Override
+# ROBOCO_CLAUDE_STATE_DIRS (space-separated) to target different paths.
 if [ "${FULL_RESET:-0}" = "1" ]; then
     DATA_ROOT="${ROBOCO_DATA_ROOT:-}"
     if [ -z "$DATA_ROOT" ]; then
@@ -110,7 +116,16 @@ if [ "${FULL_RESET:-0}" = "1" ]; then
     else
         echo ">>> FULL_RESET: no data root resolved — skipping data wipe."
     fi
-    for cdir in ${ROBOCO_CLAUDE_STATE_DIRS:-}; do
+    CLAUDE_HOME="${ROBOCO_HOST_CLAUDE_DIR:-$HOME/.claude}"
+    CLAUDE_STATE_DIRS="${ROBOCO_CLAUDE_STATE_DIRS:-$CLAUDE_HOME/projects $CLAUDE_HOME/todos}"
+    for cdir in $CLAUDE_STATE_DIRS; do
+        # Never wipe the Claude home itself — credentials live there.
+        case "$cdir" in
+            "$CLAUDE_HOME" | "$CLAUDE_HOME/")
+                echo "    refusing to clear Claude home $cdir (holds credentials)"
+                continue
+                ;;
+        esac
         if [ -e "$cdir" ]; then
             echo "    clearing Claude session state $cdir"
             rm -rf "$cdir"
