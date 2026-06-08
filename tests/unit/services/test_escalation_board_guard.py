@@ -18,7 +18,11 @@ from uuid import uuid4
 
 import pytest
 from roboco.models.base import AgentRole, TaskStatus, TaskType, Team
-from roboco.services.task import TaskService, _is_descendant_executable_task
+from roboco.services.task import (
+    TaskService,
+    _is_cell_team_task,
+    _is_descendant_executable_task,
+)
 
 
 def _bind(svc: TaskService, name: str, value: object) -> None:
@@ -39,6 +43,26 @@ def _service() -> TaskService:
 def test_descendant_code_task_is_flagged() -> None:
     task = MagicMock(parent_task_id=uuid4(), task_type=TaskType.CODE)
     assert _is_descendant_executable_task(task) is True
+
+
+def test_descendant_cell_team_task_is_flagged() -> None:
+    # A cell's own coordination task carries a cell team but a non-executable
+    # type; it must still not be handed to a board role on escalation.
+    task = MagicMock(
+        parent_task_id=uuid4(), team=Team.FRONTEND, task_type=TaskType.PLANNING
+    )
+    assert _is_cell_team_task(task) is True
+
+
+def test_root_cell_team_task_is_not_flagged() -> None:
+    # A root task can legitimately escalate up the chain (the CEO reviews it).
+    task = MagicMock(parent_task_id=None, team=Team.FRONTEND)
+    assert _is_cell_team_task(task) is False
+
+
+def test_non_cell_team_task_is_not_flagged() -> None:
+    task = MagicMock(parent_task_id=uuid4(), team=Team.BOARD)
+    assert _is_cell_team_task(task) is False
 
 
 def test_descendant_documentation_task_is_flagged() -> None:
@@ -369,3 +393,32 @@ async def test_apply_escalation_emits_blocked_audit_event() -> None:
     assert kwargs["event_type"] == "task.blocked"
     assert kwargs["details"]["from_status"] == "in_progress"
     assert kwargs["details"]["to_status"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_unblock_with_restore_emits_audit_event() -> None:
+    """The PM restore path sets status directly (bypassing the validated
+    transition) and used to skip the audit log; it must record the transition."""
+    svc = _service()
+    task = MagicMock(
+        id=uuid4(),
+        status=TaskStatus.BLOCKED,
+        pre_block_state="in_progress",
+        pre_block_assignee=None,
+        claimed_by=uuid4(),
+    )
+    _bind(svc, "get", AsyncMock(return_value=task))
+    audit_mock = MagicMock(log_task_event=AsyncMock())
+
+    with patch("roboco.services.audit.get_audit_service", return_value=audit_mock):
+        await svc.unblock_with_restore(uuid4(), uuid4(), restore=True)
+        pending = list(svc._background_tasks)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    assert task.status == TaskStatus.IN_PROGRESS
+    audit_mock.log_task_event.assert_awaited_once()
+    kwargs = audit_mock.log_task_event.await_args.kwargs
+    assert kwargs["event_type"] == "task.in_progress"
+    assert kwargs["details"]["from_status"] == "blocked"
+    assert kwargs["details"]["to_status"] == "in_progress"

@@ -87,6 +87,12 @@ _DESCENDANT_EXECUTABLE_TASK_TYPES: frozenset[str] = frozenset(
     {TaskType.CODE.value, TaskType.DOCUMENTATION.value, TaskType.DESIGN.value}
 )
 
+# Implementation-cell teams. A board/advisory role must never own a cell task —
+# including the cell's own coordination/planning task (which carries a cell team
+# but not a CODE/DOC/DESIGN type), so escalating one toward a board role is
+# diverted to the cell pool instead of handing ownership up.
+_CELL_TEAMS: frozenset[str] = frozenset({"backend", "frontend", "ux_ui"})
+
 
 def _is_descendant_executable_task(task: TaskTable) -> bool:
     """True for a child task that does cell-executed work (#14 guard).
@@ -106,6 +112,19 @@ def _is_descendant_executable_task(task: TaskTable) -> bool:
     task_type: Any = task.task_type
     type_value = task_type.value if isinstance(task_type, TaskType) else task_type
     return str(type_value) in _DESCENDANT_EXECUTABLE_TASK_TYPES
+
+
+def _is_cell_team_task(task: TaskTable) -> bool:
+    """True for a descendant task owned by an implementation cell.
+
+    Complements ``_is_descendant_executable_task``: a cell's coordination /
+    planning task carries a cell ``team`` but not a CODE/DOC/DESIGN ``task_type``,
+    so the executable-type check alone would let it escalate onto a board role.
+    """
+    if task.parent_task_id is None:
+        return False
+    team_value = getattr(task.team, "value", task.team)
+    return str(team_value) in _CELL_TEAMS
 
 
 # Notes fields (dev_notes, qa_notes, quick_context) are append-only —
@@ -977,6 +996,47 @@ class TaskService(BaseService):
         )
         return task
 
+    async def admin_set_status(
+        self,
+        task_id: UUID,
+        new_status: TaskStatus,
+        *,
+        actor_id: str | UUID | None = None,
+        actor_role: str | None = None,
+    ) -> TaskTable | None:
+        """Privileged override: set a task's status directly, always audited.
+
+        Bypasses the strict transition validator so an operator can recover a
+        task wedged in a state with no valid in-band move (e.g. a ``blocked``
+        task whose work already merged out-of-band). The change is recorded in
+        the audit log like any other transition — no status change may skip it.
+        """
+        task = await self.get(task_id)
+        if not task:
+            return None
+        from_status = (
+            task.status.value
+            if isinstance(task.status, TaskStatus)
+            else str(task.status)
+        )
+        task.status = new_status
+        await self.session.flush()
+        self._emit_status_transition_audit(
+            task,
+            from_status=from_status,
+            to_status=new_status.value,
+            agent_role=actor_role,
+            audit_agent_id=actor_id,
+        )
+        self.log.info(
+            "Task status set via admin override",
+            task_id=str(task_id),
+            from_status=from_status,
+            to_status=new_status.value,
+            actor=str(actor_id) if actor_id else None,
+        )
+        return task
+
     async def delete(self, task_id: UUID) -> bool:
         """Delete a task and all its descendants."""
         task = await self.get(task_id)
@@ -1738,8 +1798,16 @@ class TaskService(BaseService):
         from roboco.services.docs import DOCS_BASE_PATH
 
         path = Path(rel_path)
+        # An absolute path already rooted at the docs base may double the
+        # segment (``/app/docs/docs/...``) or simply be re-anchored here; reduce
+        # it to a path relative to the base so the normalization below applies
+        # uniformly. An absolute path OUTSIDE the docs root (e.g. a workspace
+        # source file) is returned as-is for the indexer to skip.
         if path.is_absolute():
-            return str(path)
+            try:
+                path = path.relative_to(DOCS_BASE_PATH)
+            except ValueError:
+                return str(path)
         parts = path.parts
         if parts and parts[0] == DOCS_BASE_PATH.name:
             path = Path(*parts[1:]) if len(parts) > 1 else Path()
@@ -2240,6 +2308,37 @@ class TaskService(BaseService):
             task.assigned_to = cast("Any", None)
             task.active_claimant_id = cast("Any", None)
             await self.session.flush()
+            return task
+        # A task the agent owns but cannot advance — it is `blocked` (a blocker
+        # it cannot self-resolve, or a dependency block) — is otherwise a trap:
+        # from `blocked` the agent has no legal forward verb and the dispatcher
+        # keeps respawning it. Releasing the claim returns the task to the pool
+        # for the cell PM to re-delegate. Audited; the active WorkSession is
+        # abandoned so a re-claim does not trip the uniqueness constraint.
+        if task.status == TaskStatus.BLOCKED:
+            pre_status = (
+                task.status.value
+                if isinstance(task.status, TaskStatus)
+                else str(task.status)
+            )
+            prior_owner = cast("Any", task.claimed_by or task.assigned_to)
+            if task.work_session_id:
+                await self._abandon_work_session_best_effort(
+                    task.work_session_id, reason="agent-unclaim-from-blocked"
+                )
+                task.work_session_id = cast("Any", None)
+            task.status = TaskStatus.PENDING
+            task.assigned_to = cast("Any", None)
+            task.claimed_by = cast("Any", None)
+            task.active_claimant_id = cast("Any", None)
+            await self.session.flush()
+            self._emit_status_transition_audit(
+                task,
+                from_status=pre_status,
+                to_status=TaskStatus.PENDING.value,
+                agent_role=None,
+                audit_agent_id=prior_owner,
+            )
             return task
         if task.status not in (TaskStatus.CLAIMED, TaskStatus.IN_PROGRESS):
             return None
@@ -3419,9 +3518,9 @@ class TaskService(BaseService):
         primitive — so both the gateway ``escalate`` verb and the HTTP escalate
         route are covered.
         """
-        if _is_descendant_executable_task(task) and await self._is_board_advisory_agent(
-            target_agent_id
-        ):
+        if (
+            _is_descendant_executable_task(task) or _is_cell_team_task(task)
+        ) and await self._is_board_advisory_agent(target_agent_id):
             await self._release_code_task_to_pool(
                 task=task,
                 escalator_slug=escalator_slug,
@@ -5547,6 +5646,12 @@ class TaskService(BaseService):
         except ValueError:
             return await self.unblock(task_id, agent_role="cell_pm")
 
+        pre_status = (
+            task.status.value
+            if isinstance(task.status, TaskStatus)
+            else str(task.status)
+        )
+        restored_owner = cast("Any", task.pre_block_assignee or task.claimed_by)
         task.status = restored_status
         if task.pre_block_assignee:
             task.assigned_to = cast("Any", task.pre_block_assignee)
@@ -5557,6 +5662,16 @@ class TaskService(BaseService):
         task.blocker_resolver_type = None
         task.blocker_raised_by = None
         await self.session.flush()
+        # This restore path sets the status directly (bypassing the strict
+        # transition validator), so emit the audit explicitly — no status
+        # change may skip the audit log.
+        self._emit_status_transition_audit(
+            task,
+            from_status=pre_status,
+            to_status=restored_status.value,
+            agent_role=None,
+            audit_agent_id=restored_owner,
+        )
         return task
 
     async def cell_pm_complete(
@@ -5659,6 +5774,12 @@ class TaskService(BaseService):
         re-dispatch source), and appends an audit note explaining why the board
         hand-off was refused.
         """
+        pre_status = (
+            task.status.value
+            if isinstance(task.status, TaskStatus)
+            else str(task.status)
+        )
+        prior_owner = cast("Any", task.claimed_by or task.assigned_to)
         task.assigned_to = cast("Any", None)
         task.claimed_by = cast("Any", None)
         task.active_claimant_id = cast("Any", None)
@@ -5673,6 +5794,16 @@ class TaskService(BaseService):
         )
         task.dev_notes = existing_notes + note
         await self.session.flush()
+        # This path sets PENDING directly (bypassing the strict transition
+        # validator), so emit the task.pending audit explicitly — no status
+        # change may skip the audit log.
+        self._emit_status_transition_audit(
+            task,
+            from_status=pre_status,
+            to_status=TaskStatus.PENDING.value,
+            agent_role=None,
+            audit_agent_id=prior_owner,
+        )
         self.log.info(
             "Descendant executable task released to pool instead of board escalation",
             task_id=str(task.id),

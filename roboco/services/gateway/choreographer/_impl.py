@@ -1503,14 +1503,14 @@ class Choreographer:
 
     @staticmethod
     def _extract_first_commit_sha(t: Any) -> str | None:
-        """Read the first commit sha off the task, dict or model alike."""
+        """Read the first commit hash off the task, dict or model alike."""
         commits: list[Any] = list(getattr(t, "commits", []) or [])
         if not commits:
             return None
         first = commits[0]
         if isinstance(first, dict):
-            return first.get("sha")
-        return getattr(first, "sha", None)
+            return first.get("hash") or first.get("sha")
+        return getattr(first, "hash", None) or getattr(first, "sha", None)
 
     @staticmethod
     def _already_addressed_criteria(existing_status: list[dict[str, Any]]) -> set[str]:
@@ -2707,11 +2707,21 @@ class Choreographer:
         Failure is logged and swallowed — the pause already happened and the
         caller must not be affected by a checkpoint DB error.
         """
-        commit_refs = [c.sha for c in (task.commits or [])[-3:]]
-        commit_count = len(task.commits or [])
-        state_summary = f"auto-paused on i_am_idle (commits: {commit_count})"
-        remaining_work = commit_refs if commit_refs else ["no commits yet"]
         try:
+            commits = task.commits or []
+            # commits may be hydrated as CommitRef objects or as plain dicts
+            # (JSON column round-trip); the identifier field is `hash` (a stray
+            # `sha` only ever appears on a gateway return value, never persisted).
+            commit_refs = [
+                (c.get("hash") or c.get("sha"))
+                if isinstance(c, dict)
+                else (getattr(c, "hash", None) or getattr(c, "sha", None))
+                for c in commits[-3:]
+            ]
+            commit_refs = [ref for ref in commit_refs if ref]
+            commit_count = len(commits)
+            state_summary = f"auto-paused on i_am_idle (commits: {commit_count})"
+            remaining_work = commit_refs if commit_refs else ["no commits yet"]
             await self.task.add_checkpoint(
                 task_id=task.id,
                 agent_id=agent_id,
