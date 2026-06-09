@@ -25,6 +25,7 @@ from roboco.api.routes.prompter import router as prompter_router
 from roboco.db.tables import AgentTable, ProjectTable
 from roboco.models.base import AgentRole, AgentStatus, Team
 from roboco.models.permissions import AgentContext
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -44,8 +45,9 @@ _DOUBLE_TURN_MSGS = 4  # 2 user + 2 assistant
 async def prompter_client(
     db_session: AsyncSession,
 ) -> AsyncIterator[dict[str, Any]]:
+    agent_id = uuid4()
     agent = AgentTable(
-        id=uuid4(),
+        id=agent_id,
         name="DevAgent",
         slug=f"dev-agent-{uuid4().hex[:8]}",
         role=AgentRole.DEVELOPER,
@@ -68,7 +70,7 @@ async def prompter_client(
 
     async def _override_agent() -> AgentContext:
         return AgentContext(
-            agent_id=agent.id,  # type: ignore[arg-type]
+            agent_id=agent_id,
             role=AgentRole.DEVELOPER,
             team=None,
         )
@@ -118,6 +120,94 @@ async def project_fixture(db_session: AsyncSession) -> ProjectTable:
 _HDR = {"X-Agent-ID": "be-dev-1", "X-Agent-Role": "developer"}
 
 
+@pytest_asyncio.fixture
+async def cross_request_client(
+    _test_database_url: str,
+) -> AsyncIterator[dict[str, Any]]:
+    """Client whose DB dependency yields a fresh, NON-auto-committing session
+    per request.
+
+    This is the boundary the shared-session ``prompter_client`` fixture can't
+    exercise: here a write is only visible to the next request if the route
+    committed it explicitly. The seed agent is committed up front so both
+    requests can resolve it.
+    """
+    engine = create_async_engine(_test_database_url, future=True, pool_pre_ping=True)
+    maker = async_sessionmaker(bind=engine, expire_on_commit=False)
+
+    agent_id = uuid4()
+    async with maker() as seed:
+        seed.add(
+            AgentTable(
+                id=agent_id,
+                name="XReqAgent",
+                slug=f"xreq-agent-{uuid4().hex[:8]}",
+                role=AgentRole.DEVELOPER,
+                team=None,
+                status=AgentStatus.ACTIVE,
+                model_config={},
+                system_prompt="dev",
+                capabilities=[],
+                permissions={},
+                metrics={},
+            )
+        )
+        await seed.commit()
+
+    app = FastAPI()
+    app.include_router(prompter_router, prefix="/api/prompter")
+
+    async def _override_db() -> AsyncIterator[AsyncSession]:
+        # A fresh session per request that does NOT commit on teardown, so
+        # persistence depends solely on the route's explicit commit.
+        async with maker() as session:
+            yield session
+
+    async def _override_agent() -> AgentContext:
+        return AgentContext(agent_id=agent_id, role=AgentRole.DEVELOPER, team=None)
+
+    app.dependency_overrides[get_db] = _override_db
+    app.dependency_overrides[get_agent_context] = _override_agent
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        yield {"client": client, "agent_id": agent_id}
+    app.dependency_overrides.clear()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_session_persists_across_requests(cross_request_client: dict) -> None:
+    """A created session must survive into the next request's own DB session.
+
+    Regression for the production 404: the create returned 201 but the session
+    write was never committed, so the immediately-following /messages call could
+    not find it. Without the route's explicit commit, this is a 404.
+    """
+    client = cross_request_client["client"]
+
+    create = await client.post("/api/prompter/sessions", json={}, headers=_HDR)
+    assert create.status_code == HTTPStatus.CREATED
+    session_id = create.json()["id"]
+
+    reply = (
+        'ack\n```roboco-meta\n{"covered": [], "ready": false, "scale": "single"}\n```'
+    )
+    with patch(
+        "roboco.services.prompter.PrompterService._create_message",
+        new_callable=AsyncMock,
+        return_value=reply,
+    ):
+        msg = await client.post(
+            f"/api/prompter/sessions/{session_id}/messages",
+            json={"content": "hello"},
+            headers=_HDR,
+        )
+
+    assert msg.status_code == HTTPStatus.OK, msg.json()
+    assert len(msg.json()["messages"]) == _SINGLE_TURN_MSGS
+
+
 # =============================================================================
 # Session-based endpoint tests
 # =============================================================================
@@ -138,20 +228,6 @@ async def test_create_session_success(prompter_client: dict) -> None:
     assert body["status"] == "active"
     assert "agent_id" in body
     assert "created_at" in body
-
-
-@pytest.mark.asyncio
-async def test_create_session_with_context(prompter_client: dict) -> None:
-    """POST /sessions accepts optional bootstrap context."""
-    client = prompter_client["client"]
-    response = await client.post(
-        "/api/prompter/sessions",
-        json={"context": {"team": "backend", "project_id": str(uuid4())}},
-        headers=_HDR,
-    )
-    assert response.status_code == HTTPStatus.CREATED
-    body = response.json()
-    assert body["status"] == "active"
 
 
 @pytest.mark.asyncio
@@ -177,24 +253,28 @@ async def test_send_message_success(prompter_client: dict) -> None:
         )
 
     assert response.status_code == HTTPStatus.OK
-    messages = response.json()
+    body = response.json()
+    messages = body["messages"]
     assert len(messages) == _SINGLE_TURN_MSGS
     roles = [m["role"] for m in messages]
     assert "user" in roles
     assert "assistant" in roles
     assert messages[-1]["content"] == "Great! Let's gather requirements."
+    assert body["draft_ready"] is False
 
 
 @pytest.mark.asyncio
 async def test_send_message_marks_draft_ready(prompter_client: dict) -> None:
-    """draft_ready signal in LLM response updates session status."""
+    """A ready roboco-meta control block flips draft_ready and session status."""
     client = prompter_client["client"]
 
     session_resp = await client.post("/api/prompter/sessions", json={}, headers=_HDR)
     session_id = session_resp.json()["id"]
 
     mock_response = (
-        "I have enough information to draft a task now. Ready to draft when you are."
+        "Understood — I have what I need.\n\n"
+        '```roboco-meta\n{"covered": ["objective", "scope", "surface", '
+        '"acceptance"], "ready": true, "scale": "single"}\n```'
     )
 
     with patch(
@@ -209,8 +289,12 @@ async def test_send_message_marks_draft_ready(prompter_client: dict) -> None:
         )
 
     assert response.status_code == HTTPStatus.OK
-    messages = response.json()
-    assert len(messages) == _SINGLE_TURN_MSGS
+    body = response.json()
+    assert len(body["messages"]) == _SINGLE_TURN_MSGS
+    assert body["draft_ready"] is True
+    assert body["scale"] == "single"
+    # The control block must not leak into the persisted assistant message.
+    assert "roboco-meta" not in body["messages"][-1]["content"]
 
 
 @pytest.mark.asyncio
@@ -500,7 +584,7 @@ async def test_full_happy_path(
             headers=_HDR,
         )
     assert step2b.status_code == HTTPStatus.OK
-    messages = step2b.json()
+    messages = step2b.json()["messages"]
     assert len(messages) == _DOUBLE_TURN_MSGS
 
     # Step 3: Get draft
@@ -578,7 +662,9 @@ async def test_prompter_chat_draft_ready(prompter_client: dict) -> None:
     client = prompter_client["client"]
 
     mock_response = (
-        "I have enough information. draft_ready=true. Ready to generate a draft."
+        "Understood.\n\n"
+        '```roboco-meta\n{"covered": ["objective", "scope", "surface", '
+        '"acceptance"], "ready": true, "scale": "single"}\n```'
     )
 
     with patch(

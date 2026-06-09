@@ -1,6 +1,8 @@
 # How RoboCo works
 
-RoboCo is a virtual software company — 18 AI agents and one human: you. Not a
+![Twelve-second looping preview of the RoboCo control panel — the org tree, a task in progress, and an approval queue.](videos/panel-teaser.gif)
+
+RoboCo is a virtual software company — 20 AI agents and one human: you. Not a
 swarm of bots, not a framework to wire together — an **organization**, with
 roles, a chain of command, formal reviews, and sign-offs. You don't micromanage
 it; you run it like a CEO. Drop work in at the top and the company carries it all
@@ -8,7 +10,7 @@ the way through planning, building, review, and documentation, then brings it
 back to your desk for the final word. You act at the two ends; the organization
 fills in everything between.
 
-What keeps eighteen agents from dissolving into noise is that RoboCo is
+What keeps twenty agents from dissolving into noise is that RoboCo is
 relentlessly opinionated about *how* work happens: everything is a task, no task
 moves without acceptance criteria, and every task walks the same strict lifecycle
 — built, QA'd, documented, PM-reviewed, approved — each step gated by role. The
@@ -29,8 +31,6 @@ proof of concept.
 walks through every page and detail end-to-end — useful as a first tour before
 diving into the screenshots below.
 
-![Twelve-second looping preview of the RoboCo control panel — the org tree, a task in progress, and an approval queue.](videos/panel-teaser.gif)
-
 ![The RoboCo Command Center: per-cell health, the CEO approval queue, live metrics, auditor alerts, and recent activity.](images/overview_dashboard.png)
 
 *The **Command Center** — a glance tells you how each cell is doing, what's
@@ -45,9 +45,10 @@ org itself:
 
 ```
 CEO (you, the human)
+ ├── Intake (on-demand interviewer — drafts a task with you)
  └── Board ── Product Owner · Head of Marketing · Auditor (silent)
       └── Main PM (coordinates the cells)
-           ├── UX/UI cell    ── PM · Dev · QA · Documenter
+           ├── UX/UI cell    ── PM · 2 Devs · QA · Documenter
            ├── Frontend cell ── PM · 2 Devs · QA · Documenter
            └── Backend cell  ── PM · 2 Devs · QA · Documenter
 ```
@@ -68,18 +69,55 @@ awaiting review, completed — on its own branch.*
 
 ### 1 · It starts with you
 
-You describe what you want — a feature, a fix, an entire product — and hand it to
-the **Board**. Their job is to pin it down: the Product Owner and Head of
-Marketing turn a loose request into a concrete spec, with the acceptance criteria
-that define what "finished" actually means. The Auditor watches the whole time
-but never interferes.
+You describe what you want — a feature, a fix, an entire product. The way in is
+the **Task Assistant** — which is the **Prompter** itself, the very feature whose
+build the rest of this page follows. (You're about to use the tool RoboCo built
+for itself; further down, you'll watch the company build it.) Instead of filling
+a form from memory, you give it a rough idea and it reads your *actual* codebase,
+asks a few sharp questions, and hands back a properly-formed task — an objective,
+a per-cell breakdown, and the acceptance criteria that define what "finished"
+really means.
 
-![The CEO's task-definition form: the title, description, and acceptance criteria that start a task.](images/task_definition_1.png)
+![The Task Assistant's scope form: pick the project or product to work in, then describe what you want to build.](images/start_prompter.png)
 
-![The same task-definition form, scrolled or scrolled-onto the acceptance criteria and submit step.](images/task_definition_2.png)
+*Where it starts — point the assistant at a project (one repo) or a product
+(several), drop in a rough idea, and it spins up an agent that reads that code
+before it says a word.*
 
-*Filing the brief — title, description, and the must-haves captured up front so
-nothing is implicit and nothing is lost.*
+![The Task Assistant chat opening: the idea is in, and the agent is cloning the repo and reading the code before it answers.](images/prompter_run_1.png)
+
+*No canned questions. The agent clones the scope and reads the real surface
+first, so everything it asks and proposes is grounded in what your code actually
+does.*
+
+<!-- Optional: re-capture prompter_run_2 after the markdown-rendering fix ships (its headers will render cleanly instead of as raw ###). -->
+![The agent's grounded analysis: a read of the existing surface, what's missing, where the feature should live, and a proposed shape — citing real files and pages.](images/prompter_run_2.png)
+
+*It comes back having done the homework — naming the real pages, services, and
+files, laying out what to build and where, and refining with you over a couple of
+turns until the spec is right.*
+
+<!-- prompter_draft_card.png is the captured smoke shot; optionally re-capture after the draft-card cell-badge dedupe ships, for cleaner "Board-led across Backend Frontend" badges. -->
+![The draft proposal card: the finished task — objective, per-cell work, and acceptance criteria — with three choices: Keep chatting, Board review & Start, or Approve & Start.](images/prompter_draft_card.png)
+
+*The proposal, ready to launch. Keep chatting to refine it, send it to the
+**Board** for review, or approve it straight to the Main PM — your call, on one
+card.*
+
+![The Task Assistant's confirmation: the task has been created and handed to the company.](images/prompter_task_accepted.png)
+
+![The created task, live: its objective, the per-cell breakdown, status, and assignment — exactly as the company will work it.](images/prompter_task_created.png)
+
+*From a rough sentence to a real, scoped task in a single chat — acceptance
+criteria and all, already moving through the company.*
+
+From here, every task follows the path you chose for it. To show that journey end
+to end, the rest of this page follows the **Prompter's own** trip through the
+company — from this same starting point to a merged pull request. Send a task to
+the **Board** and their job is to pin it down: the Product Owner and Head of
+Marketing turn the draft into a settled spec, sharpening the requirements and the
+acceptance criteria before anyone writes a line of code. The Auditor watches the
+whole time but never interferes.
 
 ![A Board review session: the Product Owner writing out requirements and acceptance criteria for a task.](images/chat_session.png)
 
@@ -222,7 +260,7 @@ for a demo — it's a real page RoboCo's agents shipped to RoboCo's own control
 panel. A company building its own product, in front of you, is the whole point of
 RoboCo. What makes that hold together isn't a clever model or a lucky run; it's
 the **organization** — the roles, the gated lifecycle, the reviews and the
-sign-offs that keep eighteen agents moving as a company instead of a crowd. Run
+sign-offs that keep twenty agents moving as a company instead of a crowd. Run
 as many of these passes as you like, across as many projects as you like.
 
 ---

@@ -1,12 +1,13 @@
 "use client";
 
-import { Sparkles } from "lucide-react";
+import { Loader2, Sparkles, X } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { usePrompter } from "@/hooks/use-prompter";
 import {
   ChatMessages,
   ChatComposer,
-  ConfirmDialog,
   SuccessCard,
+  IntakeForm,
 } from "@/components/prompter";
 
 export default function PrompterPage() {
@@ -14,23 +15,30 @@ export default function PrompterPage() {
     state,
     messages,
     isSending,
-    editableDraft,
+    activity,
     createdTaskId,
     createdTaskTitle,
     createdTaskTeam,
+    targetKind,
+    setTargetKind,
+    projectId,
+    setProjectId,
+    productId,
+    setProductId,
+    initialMessage,
+    setInitialMessage,
+    isFormValid,
+    start,
     send,
-    openReview,
-    closeReview,
     keepChatting,
-    updateDraft,
-    isValidForLaunch,
     launchTask,
     startAnother,
     isLaunching,
   } = usePrompter();
 
+  const showForm = state === "form" || state === "preparing";
   const isComposerDisabled =
-    state === "launching" || state === "success";
+    state === "launching" || state === "success" || isSending;
 
   return (
     <div className="flex h-full flex-col">
@@ -40,54 +48,82 @@ export default function PrompterPage() {
         <div>
           <h1 className="text-lg font-semibold">Task Assistant</h1>
           <p className="text-xs text-muted-foreground">
-            Describe your idea and I&apos;ll help you create a structured task
+            Chat with an agent that reads your code and drafts the task
           </p>
         </div>
+        {/* End chat — reap the agent and return to the form (any chat state) */}
+        {!showForm && state !== "success" && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="ml-auto text-muted-foreground"
+            onClick={startAnother}
+            disabled={state === "launching"}
+          >
+            <X className="mr-1 h-4 w-4" />
+            End chat
+          </Button>
+        )}
       </div>
 
-      {/* Chat area */}
-      <div className="flex flex-1 flex-col overflow-hidden">
-        {/* Success overlay in chat area */}
-        {state === "success" &&
+      {showForm ? (
+        <IntakeForm
+          targetKind={targetKind}
+          onTargetKind={setTargetKind}
+          projectId={projectId}
+          onProjectId={setProjectId}
+          productId={productId}
+          onProductId={setProductId}
+          initialMessage={initialMessage}
+          onInitialMessage={setInitialMessage}
+          isValid={isFormValid()}
+          isPreparing={state === "preparing"}
+          onStart={start}
+        />
+      ) : (
+        <div className="flex flex-1 flex-col overflow-hidden">
+          {/* Success overlay in chat area */}
+          {state === "success" &&
           createdTaskId &&
           createdTaskTitle &&
           createdTaskTeam ? (
-          <div className="flex flex-1 flex-col items-center justify-center px-8 py-8">
-            <div className="w-full max-w-md">
-              <SuccessCard
-                taskId={createdTaskId}
-                taskTitle={createdTaskTitle}
-                team={createdTaskTeam}
-                onStartAnother={startAnother}
-              />
+            <div className="flex flex-1 flex-col items-center justify-center px-8 py-8">
+              <div className="w-full max-w-md">
+                <SuccessCard
+                  taskId={createdTaskId}
+                  taskTitle={createdTaskTitle}
+                  team={createdTaskTeam}
+                  onStartAnother={startAnother}
+                />
+              </div>
             </div>
-          </div>
-        ) : (
-          <ChatMessages
-            messages={messages}
-            onOpenReview={openReview}
-            onKeepChatting={keepChatting}
-          />
-        )}
+          ) : (
+            <ChatMessages
+              messages={messages}
+              onStart={launchTask}
+              onKeepChatting={keepChatting}
+              isLaunching={isLaunching}
+            />
+          )}
 
-        {/* Composer */}
-        <ChatComposer
-          onSend={send}
-          disabled={isComposerDisabled}
-          isSending={isSending}
-        />
-      </div>
+          {/* Live activity indicator — "watch it work" (prominent) */}
+          {activity && state !== "success" && (
+            <div className="mx-4 mb-2 flex items-center gap-2.5 rounded-lg border border-primary/30 bg-primary/10 px-4 py-2.5 text-sm font-medium text-primary">
+              <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+              <span>{activity}</span>
+            </div>
+          )}
 
-      {/* Confirmation dialog (portal) */}
-      <ConfirmDialog
-        open={state === "review_modal" || state === "launching"}
-        draft={editableDraft}
-        onClose={closeReview}
-        onUpdate={updateDraft}
-        onConfirm={launchTask}
-        isLaunching={isLaunching}
-        isValid={isValidForLaunch()}
-      />
+          {/* Composer */}
+          {state !== "success" && (
+            <ChatComposer
+              onSend={send}
+              disabled={isComposerDisabled}
+              isSending={isSending}
+            />
+          )}
+        </div>
+      )}
     </div>
   );
 }

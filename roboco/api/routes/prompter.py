@@ -26,8 +26,8 @@ from roboco.api.schemas.prompter import (
     PrompterDraftTask,
     PrompterMessageRequest,
     PrompterMessageResponse,
-    PrompterSessionCreateRequest,
     PrompterSessionResponse,
+    PrompterTurnResponse,
     TaskConfirmRequest,
     TaskDraftResponse,
 )
@@ -70,23 +70,24 @@ def _translate_error(e: ServiceError) -> HTTPException:
     status_code=status.HTTP_201_CREATED,
 )
 async def create_session(
-    data: PrompterSessionCreateRequest,
     db: DbSession,
     agent: CurrentAgentContext,
 ) -> PrompterSessionResponse:
     """Create a new Prompter conversation session linked to the authenticated agent."""
     service = get_prompter_service(db)
     try:
-        session = await service.create_session(
-            agent_id=agent.agent_id,
-            context=data.context,
-        )
+        session = await service.create_session(agent_id=agent.agent_id)
     except ServiceError as e:
         raise _translate_error(e) from e
+    # Commit explicitly: the rest of the write surface (tasks, a2a, ...) does
+    # the same rather than rely on the request-teardown auto-commit, which is
+    # sensitive to middleware/teardown ordering. Without this the 201 is
+    # returned but the row may never persist, so the next request 404s.
+    await db.commit()
 
     return PrompterSessionResponse(
-        id=session.id,  # type: ignore[arg-type]
-        agent_id=session.agent_id,  # type: ignore[arg-type]
+        id=UUID(str(session.id)),
+        agent_id=UUID(str(session.agent_id)),
         status=session.status,
         created_at=session.created_at,
         updated_at=session.updated_at,
@@ -95,21 +96,22 @@ async def create_session(
 
 @router.post(
     "/sessions/{session_id}/messages",
-    response_model=list[PrompterMessageResponse],
+    response_model=PrompterTurnResponse,
 )
 async def send_message(
     session_id: UUID,
     data: PrompterMessageRequest,
     db: DbSession,
     agent: CurrentAgentContext,
-) -> list[PrompterMessageResponse]:
+) -> PrompterTurnResponse:
     """
     Accept a user message, append it and an AI assistant response to the
-    conversation, and return the updated message list.
+    conversation, and return the updated message list plus the readiness
+    signal (``draft_ready`` and the coarse ``scale`` hint) for this turn.
     """
     service = get_prompter_service(db)
     try:
-        messages = await service.send_message(
+        turn = await service.send_message(
             session_id=session_id,
             agent_id=agent.agent_id,
             content=data.content,
@@ -117,17 +119,22 @@ async def send_message(
         )
     except ServiceError as e:
         raise _translate_error(e) from e
+    await db.commit()
 
-    return [
-        PrompterMessageResponse(
-            id=msg.id,  # type: ignore[arg-type]
-            session_id=msg.session_id,  # type: ignore[arg-type]
-            role=msg.role,
-            content=msg.content,
-            created_at=msg.created_at,
-        )
-        for msg in messages
-    ]
+    return PrompterTurnResponse(
+        messages=[
+            PrompterMessageResponse(
+                id=UUID(str(msg.id)),
+                session_id=UUID(str(msg.session_id)),
+                role=msg.role,
+                content=msg.content,
+                created_at=msg.created_at,
+            )
+            for msg in turn.messages
+        ],
+        draft_ready=turn.draft_ready,
+        scale=turn.scale,
+    )
 
 
 @router.get(
@@ -153,6 +160,8 @@ async def get_draft(
         )
     except ServiceError as e:
         raise _translate_error(e) from e
+    # Persist a newly generated draft (no-op when it was already cached).
+    await db.commit()
 
     # Parse the stored draft_data into PrompterDraftTask for validation
     try:
@@ -168,11 +177,11 @@ async def get_draft(
         ) from exc
 
     return TaskDraftResponse(
-        id=draft_record.id,  # type: ignore[arg-type]
-        session_id=draft_record.session_id,  # type: ignore[arg-type]
+        id=UUID(str(draft_record.id)),
+        session_id=UUID(str(draft_record.session_id)),
         draft=draft_task,
         confirmed_at=draft_record.confirmed_at,
-        task_id=draft_record.task_id,  # type: ignore[arg-type]
+        task_id=UUID(str(draft_record.task_id)) if draft_record.task_id else None,
         created_at=draft_record.created_at,
     )
 
@@ -203,10 +212,12 @@ async def confirm_draft(
                 product_id=data.product_id,
                 assigned_to=data.assigned_to,
                 extra=data.overrides,
+                draft=data.draft.model_dump(mode="json") if data.draft else None,
             ),
         )
     except ServiceError as e:
         raise _translate_error(e) from e
+    await db.commit()
 
     return {"task_id": str(task_id)}
 
