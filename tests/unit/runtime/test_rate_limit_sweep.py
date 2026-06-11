@@ -1,4 +1,4 @@
-"""Unit tests for the rate-limit sweeper probe loop (AC4, AC8).
+"""Unit tests for the rate-limit sweeper probe loop.
 
 Tests cover:
 - probe-success path: tracker.clear() + resolve_wait + RATE_LIMIT_LIFTED event
@@ -23,6 +23,9 @@ from roboco.models.runtime import WaitingRecord
 from roboco.runtime.orchestrator import AgentOrchestrator
 from roboco.services.gateway.rate_limit_tracker import RateLimitStateTracker
 
+_HTTP_OK = 200
+_HTTP_NOT_FOUND = 404
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -45,7 +48,9 @@ def _make_redis_mock(initial_store: dict[str, Any] | None = None) -> AsyncMock:
         return 1 if store.pop(key, None) is not None else 0
 
     async def _scan(
-        _cursor: int, match: str = "*", count: int = 100  # noqa: ARG001
+        _cursor: int,
+        match: str = "*",
+        count: int = 100,  # noqa: ARG001
     ) -> tuple[int, list[bytes]]:
         # Simple in-memory scan: return all matching keys in one shot
         matches = [k.encode() for k in store if fnmatch.fnmatch(k, match)]
@@ -60,6 +65,10 @@ def _make_redis_mock(initial_store: dict[str, Any] | None = None) -> AsyncMock:
     mock.delete = AsyncMock(side_effect=_delete)
     mock.scan = AsyncMock(side_effect=_scan)
     mock.aclose = AsyncMock(side_effect=_aclose)
+    # Support `async with redis.from_url(...) as r:` — the client returns
+    # itself on enter so the configured side-effects are what the caller uses.
+    mock.__aenter__ = AsyncMock(return_value=mock)
+    mock.__aexit__ = AsyncMock(return_value=False)
     mock._store = store
     return mock
 
@@ -115,7 +124,7 @@ def _waiting_record(
 
 
 # ---------------------------------------------------------------------------
-# Tests: probe-success path (AC4)
+# Tests: probe-success path
 # ---------------------------------------------------------------------------
 
 
@@ -268,7 +277,7 @@ class TestProbeSuccessPath:
 
 
 # ---------------------------------------------------------------------------
-# Tests: probe-failure path (AC4)
+# Tests: probe-failure path
 # ---------------------------------------------------------------------------
 
 
@@ -315,7 +324,7 @@ class TestProbeFailurePath:
 
 
 # ---------------------------------------------------------------------------
-# Tests: CEO notification threshold (AC8)
+# Tests: CEO notification threshold
 # ---------------------------------------------------------------------------
 
 
@@ -477,7 +486,7 @@ class TestListRateLimitedProviders:
 
 
 # ---------------------------------------------------------------------------
-# Tests: GET /api/system/rate-limits endpoint schema (AC9)
+# Tests: GET /api/system/rate-limits endpoint schema
 # ---------------------------------------------------------------------------
 
 
@@ -498,16 +507,17 @@ class TestRateLimitsEndpoint:
             ) as client:
                 resp = await client.get("/api/system/rate-limits")
 
-        assert resp.status_code == 200  # noqa: PLR2004
-        assert resp.json() == []
+        assert resp.status_code == _HTTP_OK
+        assert resp.json() == {"entries": []}
 
     async def test_returns_provider_state_when_rate_limited(self) -> None:
         app = create_app()
 
+        retry_after = 60.0
         state = {
             "rate_limited": True,
             "activated_at": "2026-06-11T00:00:00+00:00",
-            "retry_after": 60.0,
+            "retry_after": retry_after,
             "affected_agents": ["be-dev-1"],
             "probe_failures": 3,
         }
@@ -523,14 +533,16 @@ class TestRateLimitsEndpoint:
             ) as client:
                 resp = await client.get("/api/system/rate-limits")
 
-        assert resp.status_code == 200  # noqa: PLR2004
-        data = resp.json()
-        assert len(data) == 1
-        entry = data[0]
+        assert resp.status_code == _HTTP_OK
+        entries = resp.json()["entries"]
+        assert len(entries) == 1
+        entry = entries[0]
+        # Panel-shaped, camelCase fields (not the raw Redis state).
         assert entry["provider"] == "anthropic"
-        assert entry["rate_limited"] is True
-        assert entry["probe_failures"] == 3  # noqa: PLR2004
-        assert entry["retry_after"] == 60.0  # noqa: PLR2004
+        assert entry["affectedAgents"] == ["be-dev-1"]
+        assert entry["hitAt"] == "2026-06-11T00:00:00+00:00"
+        assert entry["retryAfterSeconds"] == retry_after
+        assert entry["resumeAt"] == "2026-06-11T00:01:00+00:00"
 
     async def test_endpoint_not_404(self) -> None:
         """The endpoint must be registered in app.py — no 404."""
@@ -547,4 +559,4 @@ class TestRateLimitsEndpoint:
             ) as client:
                 resp = await client.get("/api/system/rate-limits")
 
-        assert resp.status_code != 404  # noqa: PLR2004
+        assert resp.status_code != _HTTP_NOT_FOUND

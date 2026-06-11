@@ -75,6 +75,15 @@ AGENT_BASE_IMAGE = "roboco-agent-base"
 # _sweep_budget_exceeded) to build the SDK health/usage URL.
 SDK_PORT: int = 9000
 
+# Rate-limit recovery probe: a free, unmetered liveness call confirms a
+# provider has stopped rate-limiting us before parked agents are resumed.
+# Listing models / tags costs no tokens; a non-429 response means lifted.
+_ANTHROPIC_PROBE_BASE = "https://api.anthropic.com"
+_PROBE_TIMEOUT_SECONDS = 10.0
+_HTTP_TOO_MANY_REQUESTS = 429
+# Consecutive failed recovery probes before the CEO is notified once per episode.
+_CEO_NOTIFY_THRESHOLD = 10
+
 # The intake (prompter) agent: a single seeded, board-adjacent interviewer.
 # Unlike delivery agents it is never dispatched and runs ONE persistent
 # container at a time (single CEO → one live chat). See the INTAKE section
@@ -3978,7 +3987,7 @@ Start by:
             )
 
     # =========================================================================
-    # RATE-LIMIT PROBE LOOP  (AC4, AC8)
+    # RATE-LIMIT PROBE LOOP
     # =========================================================================
 
     async def _rate_limit_probe_loop(self) -> None:
@@ -4037,106 +4046,142 @@ Start by:
 
         return RateLimitStateTracker(provider)
 
-    async def _probe_one_provider(self, provider: str, state: dict[str, Any]) -> None:
-        """Probe a single rate-limited provider and handle the outcome."""
-        # Only start probing after estimated_lift_at has passed.
-        activated_at_raw: str | None = state.get("activated_at")
-        retry_after: float | None = state.get("retry_after")
-        if activated_at_raw and retry_after is not None:
-            try:
-                activated_at = datetime.fromisoformat(activated_at_raw)
-                estimated_lift_at = activated_at + timedelta(seconds=retry_after)
-                if datetime.now(UTC) < estimated_lift_at:
-                    return  # Too early — wait until after estimated lift time
-            except (ValueError, TypeError):
-                pass  # Malformed timestamps: proceed with probe anyway
+    @staticmethod
+    def _too_early_to_probe(state: dict[str, Any]) -> bool:
+        """True while the estimated lift time (activated_at + retry_after) is future.
 
-        success = await self._do_probe(provider)
-        tracker = self._make_tracker(provider)
+        Missing or malformed timestamps fall through to allow the probe.
+        """
+        activated_at_raw = state.get("activated_at")
+        retry_after = state.get("retry_after")
+        if not activated_at_raw or retry_after is None:
+            return False
+        try:
+            activated_at = datetime.fromisoformat(activated_at_raw)
+        except (ValueError, TypeError):
+            return False
+        return datetime.now(UTC) < activated_at + timedelta(seconds=retry_after)
 
-        if success:
-            logger.info(
-                "Rate-limit probe succeeded; clearing provider", provider=provider
-            )
-            await tracker.clear()
-            # Remove from CEO-notified set so new episodes get a fresh notification
-            self._rate_limit_ceo_notified.discard(provider)
-            # Resolve all parked agents waiting for this rate limit to lift
-            rate_limited_agents = [
-                agent_id
-                for agent_id, record in list(self._waiting_records.items())
-                if record.waiting_for == "rate_limit_lifted"
-                and record.context.get("provider") == provider
-            ]
-            for agent_id in rate_limited_agents:
-                with contextlib.suppress(Exception):
-                    await self.resolve_wait(
-                        agent_id,
-                        {
-                            "reason": "rate_limit_lifted",
-                            "provider": provider,
-                            "lifted_at": datetime.now(UTC).isoformat(),
-                        },
-                    )
-            # Publish RATE_LIMIT_LIFTED event
+    def _parked_agents_for(self, provider: str) -> list[str]:
+        """Agent slugs parked waiting for *provider*'s rate limit to lift."""
+        return [
+            agent_id
+            for agent_id, record in list(self._waiting_records.items())
+            if record.waiting_for == "rate_limit_lifted"
+            and record.context.get("provider") == provider
+        ]
+
+    async def _on_probe_success(self, provider: str, tracker: Any) -> None:
+        """Clear the limit, resume parked agents, publish RATE_LIMIT_LIFTED."""
+        logger.info("Rate-limit probe succeeded; clearing provider", provider=provider)
+        await tracker.clear()
+        # New episodes should get a fresh CEO notification.
+        self._rate_limit_ceo_notified.discard(provider)
+        resumed = self._parked_agents_for(provider)
+        for agent_id in resumed:
+            with contextlib.suppress(Exception):
+                await self.resolve_wait(
+                    agent_id,
+                    {
+                        "reason": "rate_limit_lifted",
+                        "provider": provider,
+                        "lifted_at": datetime.now(UTC).isoformat(),
+                    },
+                )
+        with contextlib.suppress(Exception):
             from roboco.events import get_event_bus
             from roboco.models.events import Event, EventType
 
-            with contextlib.suppress(Exception):
-                bus = get_event_bus()
-                event = Event(
+            await get_event_bus().publish(
+                Event(
                     type=EventType.RATE_LIMIT_LIFTED,
                     data={
                         "provider": provider,
-                        "resumedAgents": rate_limited_agents,
+                        "resumedAgents": resumed,
                         "timestamp": datetime.now(UTC).isoformat(),
                     },
                 )
-                await bus.publish(event)
-            logger.info(
-                "RATE_LIMIT_LIFTED published",
-                provider=provider,
-                resumed_agents=len(rate_limited_agents),
             )
+        logger.info(
+            "RATE_LIMIT_LIFTED published",
+            provider=provider,
+            resumed_agents=len(resumed),
+        )
+
+    async def _on_probe_failure(
+        self, provider: str, tracker: Any, activated_at_raw: str | None
+    ) -> None:
+        """Count a failed probe; notify the CEO once at the failure threshold."""
+        failure_count = await tracker.increment_probe_failures()
+        logger.debug(
+            "Rate-limit probe failed", provider=provider, probe_failures=failure_count
+        )
+        if (
+            failure_count >= _CEO_NOTIFY_THRESHOLD
+            and provider not in self._rate_limit_ceo_notified
+        ):
+            self._rate_limit_ceo_notified.add(provider)
+            await self._notify_rate_limit_ceo(
+                provider=provider,
+                activated_at_str=activated_at_raw or "unknown",
+                paused_agent_count=len(self._parked_agents_for(provider)),
+            )
+
+    async def _probe_one_provider(self, provider: str, state: dict[str, Any]) -> None:
+        """Probe a single rate-limited provider and handle the outcome."""
+        if self._too_early_to_probe(state):
+            return  # Wait until after the estimated lift time.
+        tracker = self._make_tracker(provider)
+        if await self._do_probe(provider):
+            await self._on_probe_success(provider, tracker)
         else:
-            failure_count = await tracker.increment_probe_failures()
-            logger.debug(
-                "Rate-limit probe failed",
-                provider=provider,
-                probe_failures=failure_count,
-            )
-            # Send CEO notification once when failures reach threshold 10
-            _CEO_NOTIFY_THRESHOLD = 10
-            if (
-                failure_count >= _CEO_NOTIFY_THRESHOLD
-                and provider not in self._rate_limit_ceo_notified
-            ):
-                self._rate_limit_ceo_notified.add(provider)
-                paused_count = sum(
-                    1
-                    for record in self._waiting_records.values()
-                    if record.waiting_for == "rate_limit_lifted"
-                    and record.context.get("provider") == provider
-                )
-                activated_at_str: str = activated_at_raw or "unknown"
-                await self._notify_rate_limit_ceo(
-                    provider=provider,
-                    activated_at_str=activated_at_str,
-                    paused_agent_count=paused_count,
-                )
+            await self._on_probe_failure(provider, tracker, state.get("activated_at"))
 
-    async def _do_probe(self, _provider: str) -> bool:
-        """Return True if the provider is accepting requests again.
+    @staticmethod
+    def _probe_target(provider: str) -> tuple[str | None, dict[str, str]]:
+        """Resolve the (url, headers) for a free liveness probe of ``provider``.
 
-        This method is intentionally thin so tests can monkeypatch it.
-        The default implementation is conservative: returns ``True``
-        (success) so that once the estimated_lift_at window has passed
-        the probe clears the rate limit.  Override in tests to inject
-        either success or failure scenarios.
+        Returns ``(None, {})`` when the provider can't be probed — an unknown
+        provider, or Anthropic with no API key configured. The caller then
+        falls back to time-expiry optimism rather than parking forever.
         """
-        # Default: optimistic — time-expiry gate (checked before this call)
-        # is the primary guard; the probe itself succeeds.
-        return True
+        p = provider.lower()
+        if p == "anthropic":
+            key = settings.anthropic_api_key
+            if not key:
+                return None, {}
+            return (
+                f"{_ANTHROPIC_PROBE_BASE}/v1/models",
+                {"x-api-key": key, "anthropic-version": "2023-06-01"},
+            )
+        if p.startswith("ollama"):
+            return f"{settings.ollama_base_url.rstrip('/')}/api/tags", {}
+        return None, {}
+
+    async def _do_probe(self, provider: str) -> bool:
+        """Return True if ``provider`` is accepting requests again (not 429).
+
+        Makes a free, unmetered liveness call — Anthropic ``GET /v1/models``
+        or Ollama ``GET /api/tags`` — and treats any non-429 response as the
+        rate limit having lifted. A 429 keeps the provider parked; a network
+        error stays parked too (retry next sweep). When the provider can't be
+        probed (no key / unknown), fall back to time-expiry optimism: the
+        caller only reaches this after ``estimated_lift_at`` has passed.
+
+        Injectable boundary — tests monkeypatch this to force outcomes.
+        """
+        url, headers = self._probe_target(provider)
+        if url is None:
+            return True  # cannot probe — trust the elapsed retry_after window
+        try:
+            async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT_SECONDS) as client:
+                resp = await client.get(url, headers=headers)
+        except httpx.HTTPError as exc:
+            logger.debug(
+                "Rate-limit probe request failed", provider=provider, error=str(exc)
+            )
+            return False  # unreachable — stay parked, retry on the next sweep
+        return resp.status_code != _HTTP_TOO_MANY_REQUESTS
 
     async def _notify_rate_limit_ceo(
         self,
@@ -4146,7 +4191,7 @@ Start by:
     ) -> None:
         """Send a high-priority notification to the CEO about a persistent rate limit.
 
-        Fires once per episode (AC8).  Follows the same pattern as
+        Fires once per rate-limit episode. Follows the same pattern as
         ``_notify_stranded_agent`` — direct DB insert + delivery.deliver().
         """
         try:
