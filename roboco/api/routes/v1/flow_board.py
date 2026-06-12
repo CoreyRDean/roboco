@@ -13,9 +13,11 @@ from roboco.api.routes.v1._role_dep import envelope_to_response, require_board
 from roboco.api.schemas.v1.flow import (
     EscalateToCeoRequest,
     IAmIdleRequest,
+    PitchRequest,
     TriageRequest,
 )
 from roboco.services.gateway.choreographer import Choreographer
+from roboco.services.gateway.choreographer.board import PitchInputs
 
 router = APIRouter(
     prefix="/api/v1/flow/board",
@@ -47,6 +49,29 @@ async def escalate_to_ceo(
     choreographer: _ChoreographerDep,
 ) -> dict:
     env = await choreographer.escalate_to_ceo(x_agent_id, body.task_id, body.reason)
+    return envelope_to_response(env, request)
+
+
+@router.post("/pitch")
+async def pitch(
+    request: Request,
+    body: PitchRequest,
+    x_agent_id: _AgentIdHeader,
+    choreographer: _ChoreographerDep,
+) -> dict:
+    env = await choreographer.pitch(
+        x_agent_id,
+        PitchInputs(
+            title=body.title,
+            objective=body.objective,
+            what_this_builds=body.what_this_builds,
+            the_work=[cell.model_dump() for cell in body.the_work],
+            success_criteria=body.success_criteria,
+            rationale=body.rationale,
+            notes=body.notes,
+            priority=body.priority,
+        ),
+    )
     return envelope_to_response(env, request)
 
 

@@ -17,14 +17,51 @@ import {
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { CheckCircle2, XCircle, Clock, FileText, ExternalLink, Rocket } from "lucide-react";
+import {
+  CheckCircle2,
+  XCircle,
+  Clock,
+  FileText,
+  ExternalLink,
+  Rocket,
+  Lightbulb,
+} from "lucide-react";
 import Link from "next/link";
 import { TaskStatus, Team, type Task } from "@/types";
+import type { CellWork } from "@/lib/api/prompter";
 import { toast } from "sonner";
 
 interface CeoApprovalQueueProps {
   className?: string;
 }
+
+// The structured pitch payload the Board persists under
+// `proactive_context.pitch` (see TaskService.create_pitch). A pitch is a
+// product proposal, so the queue renders its rationale — the objective served,
+// what it builds, the per-cell work, success criteria, and why now — instead of
+// a bare title. Mirrors the intake draft shape (CellWork comes from the prompter
+// types) so a pitch reads like the draft proposal card it was authored as.
+interface PitchContent {
+  objective?: string | null;
+  what_this_builds?: string[];
+  the_work?: CellWork[];
+  notes?: string[];
+  rationale?: string | null;
+  acceptance_criteria?: string[];
+}
+
+// `team` values are slugs; render UX/UI specially, title-case the rest.
+const cellLabel = (team: string) =>
+  team === "ux_ui" ? "UX/UI" : team.charAt(0).toUpperCase() + team.slice(1);
+
+// A pitch is identified by its origin marker; its rationale lives in
+// proactive_context.pitch. Returns null for non-pitch tasks so the queue falls
+// back to the plain row.
+const getPitch = (task: Task): PitchContent | null => {
+  if (task.source !== "pitch") return null;
+  const pitch = task.proactive_context?.pitch;
+  return pitch && typeof pitch === "object" ? (pitch as PitchContent) : null;
+};
 
 export function CeoApprovalQueue({ className }: CeoApprovalQueueProps) {
   const queryClient = useQueryClient();
@@ -175,7 +212,88 @@ export function CeoApprovalQueue({ className }: CeoApprovalQueueProps) {
   const readyToStart = startTasks || [];
   const totalCount = pendingTasks.length + readyToStart.length;
 
-  const renderRow = (task: Task, kind: "start" | "approve") => (
+  // Render a pitch's rationale (objective served, what it builds, the per-cell
+  // work, success criteria, why now) so the CEO greenlights a credible bet, not
+  // a bare title. Follows the draft-proposal-card presentation: objective as the
+  // lede, distinct participating cells as badges, success criteria as a checklist.
+  const renderPitchRationale = (pitch: PitchContent) => {
+    const cells = pitch.the_work ?? [];
+    // the_work has one entry per work item, so dedupe to avoid repeating a cell's
+    // badge (Backend Backend …).
+    const distinctTeams = Array.from(new Set(cells.map((c) => c.team)));
+    const criteria = pitch.acceptance_criteria ?? [];
+    return (
+      <div className="mt-2 space-y-2">
+        {pitch.objective && (
+          <p className="text-sm text-muted-foreground line-clamp-3">
+            {pitch.objective}
+          </p>
+        )}
+        {pitch.what_this_builds && pitch.what_this_builds.length > 0 && (
+          <div>
+            <p className="text-xs font-medium text-muted-foreground mb-1">
+              What it builds
+            </p>
+            <ul className="space-y-0.5">
+              {pitch.what_this_builds.slice(0, 4).map((item, i) => (
+                <li key={i} className="text-xs text-foreground line-clamp-2">
+                  · {item}
+                </li>
+              ))}
+              {pitch.what_this_builds.length > 4 && (
+                <li className="text-xs text-muted-foreground">
+                  +{pitch.what_this_builds.length - 4} more…
+                </li>
+              )}
+            </ul>
+          </div>
+        )}
+        {distinctTeams.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs font-medium text-muted-foreground">
+              {distinctTeams.length > 1 ? "Board-led across" : "Cell:"}
+            </span>
+            {distinctTeams.map((team) => (
+              <Badge key={team} variant="outline" className="text-xs">
+                {cellLabel(team)}
+              </Badge>
+            ))}
+          </div>
+        )}
+        {criteria.length > 0 && (
+          <div>
+            <p className="text-xs font-medium text-muted-foreground mb-1">
+              Success criteria ({criteria.length})
+            </p>
+            <ul className="space-y-1">
+              {criteria.slice(0, 4).map((criterion, i) => (
+                <li key={i} className="flex items-start gap-2 text-xs">
+                  <span className="mt-0.5 h-3 w-3 shrink-0 rounded-full border border-primary/50 flex items-center justify-center">
+                    <span className="h-1.5 w-1.5 rounded-full bg-primary/50" />
+                  </span>
+                  <span className="text-foreground line-clamp-2">{criterion}</span>
+                </li>
+              ))}
+              {criteria.length > 4 && (
+                <li className="text-xs text-muted-foreground pl-5">
+                  +{criteria.length - 4} more…
+                </li>
+              )}
+            </ul>
+          </div>
+        )}
+        {pitch.rationale && (
+          <p className="text-xs text-muted-foreground italic line-clamp-3">
+            Why now: {pitch.rationale}
+          </p>
+        )}
+      </div>
+    );
+  };
+
+  const renderRow = (task: Task, kind: "start" | "approve") => {
+    const pitch = getPitch(task);
+    return (
     <div
       key={task.id}
       className="flex items-start justify-between p-4 border rounded-lg hover:bg-muted/50 transition-colors"
@@ -184,6 +302,12 @@ export function CeoApprovalQueue({ className }: CeoApprovalQueueProps) {
         <div className="flex items-center gap-2 mb-1">
           {getPriorityBadge(task.priority)}
           <Badge variant="outline">{task.team}</Badge>
+          {pitch && (
+            <Badge variant="secondary" className="gap-1">
+              <Lightbulb className="h-3 w-3" />
+              Pitch
+            </Badge>
+          )}
         </div>
         <Link
           href={`/tasks/${task.id}`}
@@ -191,10 +315,14 @@ export function CeoApprovalQueue({ className }: CeoApprovalQueueProps) {
         >
           {task.title}
         </Link>
-        {task.quick_context && (
-          <p className="text-sm text-muted-foreground mt-1 line-clamp-2">
-            {task.quick_context}
-          </p>
+        {pitch ? (
+          renderPitchRationale(pitch)
+        ) : (
+          task.quick_context && (
+            <p className="text-sm text-muted-foreground mt-1 line-clamp-2">
+              {task.quick_context}
+            </p>
+          )
         )}
       </div>
       <div className="flex items-center gap-2 ml-4 flex-shrink-0">
@@ -233,7 +361,8 @@ export function CeoApprovalQueue({ className }: CeoApprovalQueueProps) {
         )}
       </div>
     </div>
-  );
+    );
+  };
 
   return (
     <>
@@ -294,7 +423,9 @@ export function CeoApprovalQueue({ className }: CeoApprovalQueueProps) {
               {actionType === "approve"
                 ? "This will complete the task and notify the team."
                 : actionType === "start"
-                  ? "This hands the task to the Main PM to delegate to the cells and begin work."
+                  ? selectedTask && getPitch(selectedTask)
+                    ? "Greenlighting this pitch provisions the private repo(s), registers the product, and seeds the first delivery work — then hands off to the Main PM."
+                    : "This hands the task to the Main PM to delegate to the cells and begin work."
                   : "This will send the task back for revision."}
             </DialogDescription>
           </DialogHeader>
@@ -304,13 +435,26 @@ export function CeoApprovalQueue({ className }: CeoApprovalQueueProps) {
               <div className="flex items-center gap-2 mb-2">
                 {getPriorityBadge(selectedTask.priority)}
                 <Badge variant="outline">{selectedTask.team}</Badge>
+                {getPitch(selectedTask) && (
+                  <Badge variant="secondary" className="gap-1">
+                    <Lightbulb className="h-3 w-3" />
+                    Pitch
+                  </Badge>
+                )}
               </div>
               <p className="font-medium">{selectedTask.title}</p>
-              {selectedTask.description && (
-                <p className="text-sm text-muted-foreground mt-2 line-clamp-3">
-                  {selectedTask.description}
-                </p>
-              )}
+              {(() => {
+                const pitch = getPitch(selectedTask);
+                return pitch ? (
+                  renderPitchRationale(pitch)
+                ) : (
+                  selectedTask.description && (
+                    <p className="text-sm text-muted-foreground mt-2 line-clamp-3">
+                      {selectedTask.description}
+                    </p>
+                  )
+                );
+              })()}
               <Link
                 href={`/tasks/${selectedTask.id}`}
                 target="_blank"

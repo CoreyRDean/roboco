@@ -679,6 +679,14 @@ def _next_hint_pm_idle(_t: Any) -> str:
     return "idle until subtasks finish"
 
 
+def _next_hint_pitch(_t: Any) -> str:
+    return (
+        "pitch authored — it now sits in the CEO's Approve & Start queue."
+        " i_am_idle until the CEO decides (approve provisions the repo +"
+        " seeds delivery; reject returns it for revision)."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Context — the third arg to Precondition.check (caller-supplied state)
 # ---------------------------------------------------------------------------
@@ -1055,6 +1063,25 @@ _INTENT_VERBS: dict[str, IntentSpec] = {
         extra_preconditions=(),
         side_effects=(),
         next_hint=lambda _t: "act on a listed task or i_am_idle",
+    ),
+    # Phase 4: Board pitch — origination of a new product proposal.
+    "pitch": IntentSpec(
+        name="pitch",
+        allowed_roles=frozenset({Role.PRODUCT_OWNER, Role.HEAD_MARKETING}),
+        description=(
+            "Author a new product PITCH grounded in the goals and research. Creates"
+            " a root proposal task that lands in the CEO's Approve & Start queue"
+            " (pending + board_review_complete). Greenlighting a new product line"
+            " is gated, so this always reaches the CEO; on approval the system"
+            " autonomously provisions the private repo(s) and seeds delivery."
+            " The verb composes no atomic action — it originates a NEW root task"
+            " rather than transitioning an existing one, so the body owns the"
+            " creation dispatch (mirrors board_triage's read-only special form)."
+        ),
+        composes=(),  # special — originates a new root task; verb body owns dispatch
+        extra_preconditions=(),
+        side_effects=(),
+        next_hint=_next_hint_pitch,
     ),
 }
 

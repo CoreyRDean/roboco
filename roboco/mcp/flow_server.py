@@ -397,6 +397,52 @@ def escalate_to_ceo(task_id: str, reason: str) -> dict[str, Any]:
     return _post(_role_path("escalate_to_ceo"), {"task_id": task_id, "reason": reason})
 
 
+def pitch(
+    title: str,
+    objective: str,
+    what_this_builds: list[str],
+    the_work: list[dict[str, Any]],
+    success_criteria: list[str],
+    rationale: str,
+    notes: list[str] | None = None,
+    priority: int = 2,
+) -> dict[str, Any]:
+    """Board: author a new product PITCH for the CEO's Approve & Start queue.
+
+    A pitch is a credible bet, not a thought — ground it in the company goals and
+    real research. It creates a root proposal task that lands in the CEO action
+    queue with a clear approve/reject/discuss decision; greenlighting a new
+    product line is gated, so it always reaches the human. On approval the system
+    autonomously provisions the private repo(s) and seeds delivery. No repo
+    exists yet, so there is NO project/product argument.
+
+    Args:
+        title: The pitch name.
+        objective: The objective this product serves (tie it to a goal).
+        what_this_builds: Concrete artifacts the product would ship.
+        the_work: Per-cell breakdown — list of
+            ``{"team": "backend"|"frontend"|"ux_ui", "summary": "...",
+            "items": ["..."]}``. Length drives single- vs multi-cell provisioning.
+        success_criteria: What "this worked" looks like.
+        rationale: Why now — grounded in research.
+        notes: Constraints, reuse pointers, things to confirm with the CEO.
+        priority: 0 (highest) to 3 (lowest). Default 2.
+    """
+    return _post(
+        _role_path("pitch"),
+        {
+            "title": title,
+            "objective": objective,
+            "what_this_builds": what_this_builds,
+            "the_work": the_work,
+            "success_criteria": success_criteria,
+            "rationale": rationale,
+            "notes": notes or [],
+            "priority": priority,
+        },
+    )
+
+
 # ---------- Cell PM + Main PM extras ----------
 # i_will_plan, delegate, submit_up, give_me_work — restore the pre-Phase-4
 # PM lifecycle so PMs can drive parent tasks instead of stalling.
@@ -528,6 +574,8 @@ _TOOLS: dict[str, Any] = {
     "submit_up": submit_up,
     # board / main pm
     "escalate_to_ceo": escalate_to_ceo,
+    # board (PO + Head Marketing) — product origination
+    "pitch": pitch,
 }
 
 

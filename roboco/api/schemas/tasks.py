@@ -334,6 +334,12 @@ class TaskResponse(BaseModel):
     source: str = "manual"
     confirmed_by_human: bool = False
 
+    # Structured origin payload. For a Board pitch (source="pitch") this carries
+    # proactive_context["pitch"] — the objective, what-it-builds, per-cell work,
+    # and success criteria the CEO Approve & Start queue renders as the pitch
+    # rationale (Phase 4). None for tasks that carry no structured context.
+    proactive_context: dict[str, Any] | None = None
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -682,6 +688,7 @@ def task_to_response(task: "TaskTable") -> TaskResponse:
         pr_url=getattr(task, "pr_url", None),
         source=getattr(task, "source", "manual"),
         confirmed_by_human=getattr(task, "confirmed_by_human", False),
+        proactive_context=getattr(task, "proactive_context", None),
     )
 
 

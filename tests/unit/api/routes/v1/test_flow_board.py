@@ -101,6 +101,56 @@ def test_escalate_to_ceo_validates_reason_required() -> None:
     assert resp.status_code == _HTTP_422
 
 
+_VALID_PITCH_BODY: dict[str, object] = {
+    "title": "Solo Dev Workbench",
+    "objective": "One calm workbench for solo AI developers; serves the v1 goal.",
+    "what_this_builds": ["A web app", "A CLI"],
+    "the_work": [
+        {"team": "backend", "summary": "API + storage", "items": ["endpoints"]},
+        {"team": "frontend", "summary": "the UI", "items": ["panels"]},
+    ],
+    "success_criteria": ["A solo dev ships a project end to end in under an hour"],
+    "rationale": "Research shows solo AI devs juggle five disconnected tools.",
+    "notes": ["Reuse the existing auth module"],
+}
+
+
+@pytest.mark.asyncio
+async def test_pitch_returns_envelope_and_forwards_contract() -> None:
+    """POST /api/v1/flow/board/pitch maps the body onto PitchInputs."""
+    mock_chore = MagicMock()
+    mock_chore.pitch = AsyncMock(
+        return_value=_make_envelope(status="pending", task_id=_TASK_ID)
+    )
+    client = TestClient(_build_app(mock_chore))
+
+    resp = client.post(
+        "/api/v1/flow/board/pitch",
+        json=_VALID_PITCH_BODY,
+        headers=_HEADERS,
+    )
+
+    assert resp.status_code == _HTTP_200
+    body = resp.json()
+    assert body["status"] == "pending"
+    mock_chore.pitch.assert_awaited_once()
+    inputs = mock_chore.pitch.call_args.args[1]
+    assert inputs.title == "Solo Dev Workbench"
+    assert inputs.the_work[0]["team"] == "backend"
+    assert inputs.success_criteria
+
+
+def test_pitch_validates_required_fields() -> None:
+    """POST pitch rejects an empty the_work / success_criteria (min_length=1)."""
+    mock_chore = MagicMock()
+    client = TestClient(_build_app(mock_chore))
+
+    bad = {**_VALID_PITCH_BODY, "the_work": [], "success_criteria": []}
+    resp = client.post("/api/v1/flow/board/pitch", json=bad, headers=_HEADERS)
+
+    assert resp.status_code == _HTTP_422
+
+
 @pytest.mark.asyncio
 async def test_i_am_idle_returns_envelope() -> None:
     """POST /api/v1/flow/board/i_am_idle delegates to Choreographer.i_am_idle."""

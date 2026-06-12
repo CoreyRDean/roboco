@@ -156,6 +156,15 @@ Pass QA. Transitions awaiting_qa -> awaiting_documentation.
 **Composes:** qa_pass
 
 
+## pitch
+
+Author a new product PITCH grounded in the goals and research. Creates a root proposal task that lands in the CEO's Approve & Start queue (pending + board_review_complete). Greenlighting a new product line is gated, so this always reaches the CEO; on approval the system autonomously provisions the private repo(s) and seeds delivery. The verb composes no atomic action — it originates a NEW root task rather than transitioning an existing one, so the body owns the creation dispatch (mirrors board_triage's read-only special form).
+
+**Allowed roles:** head_marketing, product_owner
+
+**Composes:** (no atomic actions)
+
+
 ## reassign
 
 Hand a claimed/in_progress task to another developer in your own cell. The branch is keyed to the task (not the agent), so it is preserved — the new developer continues the work-in-progress. No status change.

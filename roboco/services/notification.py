@@ -285,6 +285,91 @@ class NotificationService:
             )
         )
 
+    async def send_pitch_ready_notification(
+        self,
+        task_id: str,
+        title: str | None = None,
+        from_agent: str | None = None,
+        to_ceo: str = "ceo",
+    ) -> None:
+        """Tell the CEO the Board authored a new product PITCH awaiting greenlight.
+
+        A pitch (Phase 4) is born already board-reviewed — the authoring Board
+        roles ARE the board — so it skips the two-reviewer dispatch that
+        ``send_board_review_complete_notification`` backs and needs its own
+        actionable signal. Like that helper this emits a formal APPROVAL
+        notification (ack-required) carrying ``related_task_id`` so the pitch is
+        a real signal the panel's CEO action queue surfaces, not channel noise.
+        The distinct subject names it as a *product greenlight* (a gated
+        decision — INTENT.md §6) rather than a routine coordination handoff.
+        """
+        logger.info(
+            "Sending pitch-ready notification to CEO",
+            task_id=task_id,
+            to_ceo=to_ceo,
+        )
+
+        named = f" '{title}'" if title else ""
+        body = (
+            f"The Board has authored a new product PITCH{named} (task {task_id}).\n\n"
+            "It is grounded in the company goals and research and is ready for "
+            "your Approve & Start decision. Greenlighting a new product line is "
+            "gated, so this needs you. On approval the system autonomously "
+            "provisions the private repo(s) and seeds the first delivery work."
+        )
+        await self._create_notification(
+            CreateNotificationParams(
+                notification_type=NotificationType.APPROVAL,
+                priority=NotificationPriority.HIGH,
+                from_agent=from_agent or "system",
+                to_agents=[to_ceo],
+                subject=f"New product pitch awaiting approval: Task {task_id}",
+                body=body,
+                related_task_id=task_id,
+            )
+        )
+
+    async def send_pitch_provisioning_failed_notification(
+        self,
+        task_id: str,
+        reason: str,
+        from_agent: str | None = None,
+        to_ceo: str = "ceo",
+    ) -> None:
+        """Surface a failed pitch provisioning to the CEO — never strand silently.
+
+        Provisioning an approved pitch (create private repo(s), register the
+        project/product, seed delivery) is autonomous because the CEO already
+        said yes. But a failure there must NOT leave the approval half-applied
+        and silent (INTENT.md §11 capability #8 — stall surfacing). This emits a
+        formal ack-required notification to the CEO with the concrete reason and
+        the remediation so the approval is recoverable rather than wedged.
+        """
+        logger.warning(
+            "Sending pitch-provisioning-failed notification to CEO",
+            task_id=task_id,
+            reason=reason,
+        )
+        body = (
+            f"Provisioning for the approved pitch (task {task_id}) did not "
+            f"complete.\n\nReason: {reason}\n\n"
+            "The approval is recorded but the private repo(s) / delivery seeding "
+            "did not finish. Resolve the cause (commonly a missing provisioning "
+            "org or token) and re-approve — provisioning is idempotent, so a "
+            "retry will not double-create."
+        )
+        await self._create_notification(
+            CreateNotificationParams(
+                notification_type=NotificationType.BLOCKER_ESCALATION,
+                priority=NotificationPriority.HIGH,
+                from_agent=from_agent or "system",
+                to_agents=[to_ceo],
+                subject=f"Pitch provisioning failed: Task {task_id}",
+                body=body,
+                related_task_id=task_id,
+            )
+        )
+
     async def send_ack_notification(
         self,
         *,
