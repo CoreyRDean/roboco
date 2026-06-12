@@ -9,6 +9,7 @@ export { knowledgeBaseApi } from "./knowledge-base";
 export { projectsApi } from "./projects";
 export { productsApi } from "./products";
 export { goalsApi } from "./goals";
+export { secretaryApi } from "./secretary";
 export { workSessionsApi } from "./work-sessions";
 export { gitApi } from "./git";
 export { a2aApi } from "./a2a";

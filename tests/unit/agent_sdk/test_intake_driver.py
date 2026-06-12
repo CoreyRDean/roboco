@@ -165,6 +165,51 @@ def test_normalize_propose_draft_without_title_is_ignored() -> None:
     assert normalize(msg) == []
 
 
+def test_normalize_propose_goal_edit_becomes_goal_edit_chunk() -> None:
+    # The Secretary's goal-edit seam mirrors propose_draft: CALLING
+    # propose_goal_edit → one `goal_edit` chunk carrying the patch (not tool_use).
+    msg = AssistantMessage(
+        [
+            ToolUseBlock(
+                "propose_goal_edit",
+                {"edit": {"north_star": "Win the prosumer dev market"}},
+            )
+        ]
+    )
+    chunks = normalize(msg)
+    assert [c.kind for c in chunks] == ["goal_edit"]
+    assert chunks[0].data["north_star"] == "Win the prosumer dev market"
+
+
+def test_normalize_propose_goal_edit_accepts_flat_input() -> None:
+    # Tolerant of the patch fields passed flat (no "edit" wrapper).
+    msg = AssistantMessage(
+        [ToolUseBlock("propose_goal_edit", {"constraints": ["no crypto"]})]
+    )
+    chunks = normalize(msg)
+    assert [c.kind for c in chunks] == ["goal_edit"]
+    assert chunks[0].data["constraints"] == ["no crypto"]
+
+
+def test_normalize_propose_goal_edit_namespaced_name() -> None:
+    # However the SDK namespaces it (e.g. mcp__intake__propose_goal_edit).
+    msg = AssistantMessage(
+        [
+            ToolUseBlock(
+                "mcp__intake__propose_goal_edit",
+                {"edit": {"objectives": [{"title": "Ship v1"}]}},
+            )
+        ]
+    )
+    assert [c.kind for c in normalize(msg)] == ["goal_edit"]
+
+
+def test_normalize_propose_goal_edit_empty_patch_is_ignored() -> None:
+    # An edit with none of the editable fields is not a usable goal edit.
+    msg = AssistantMessage([ToolUseBlock("propose_goal_edit", {"edit": {"foo": 1}})])
+    assert normalize(msg) == []
+
+
 def test_normalize_result_message_carries_session_id() -> None:
     cost = 0.01
     chunks = normalize(ResultMessage(session_id="sess-123", total_cost_usd=cost))

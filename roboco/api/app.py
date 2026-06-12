@@ -34,6 +34,7 @@ from roboco.api.routes.project import router as project_router
 from roboco.api.routes.prompter import router as prompter_router
 from roboco.api.routes.prompter_live import router as prompter_live_router
 from roboco.api.routes.provider import router as provider_router
+from roboco.api.routes.secretary import router as secretary_router
 from roboco.api.routes.sessions import router as sessions_router
 from roboco.api.routes.stream import router as stream_router
 from roboco.api.routes.system import router as system_router
@@ -335,6 +336,13 @@ def create_app() -> FastAPI:
         prompter_live_router,
         prefix=f"{api_prefix}/prompter",
         tags=["Prompter"],
+    )
+
+    # Secretary — CEO chief-of-staff read (status/queue/digest) + relay surfaces
+    app.include_router(
+        secretary_router,
+        prefix=f"{api_prefix}/secretary",
+        tags=["Secretary"],
     )
 
     # Work Sessions
