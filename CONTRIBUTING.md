@@ -49,8 +49,8 @@ PR. This is a one-time action; subsequent PRs are recognized automatically.
    pnpm format && pnpm lint && pnpm typecheck && pnpm test
    ```
 
-4. Sign your commits (recommended) with `git commit -s` to assert the
-   Developer Certificate of Origin alongside the CLA.
+4. **Sign your commits.** `master` requires *verified* signatures, so set up
+   commit signing before you push — see [Signing your commits](#signing-your-commits).
 5. Open a pull request with a clear description of the change and its
    motivation.
 
@@ -58,6 +58,37 @@ PR. This is a one-time action; subsequent PRs are recognized automatically.
 
 Keep commits focused and descriptive. Do not include AI-generated attribution
 footers or co-author trailers.
+
+## Signing your commits
+
+`master` is protected by a rule that **every commit must carry a verified
+signature**. Set this up once and it's automatic from then on; otherwise a
+maintainer has to bypass the rule to merge your PR.
+
+> This is *cryptographic* signing (`git commit -S`, shown as **Verified** on
+> GitHub) — not the `-s` Developer Certificate of Origin *sign-off* trailer. The
+> sign-off does **not** satisfy the signature rule.
+
+The lowest-friction method reuses the SSH key you already use with GitHub:
+
+```bash
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub   # or id_rsa.pub
+git config --global commit.gpgsign true
+```
+
+Then add that **same public key** to GitHub a second time as a signing key:
+**Settings → SSH and GPG keys → New SSH key → Key type: _Signing Key_**. (GPG
+signing also works if you prefer it.)
+
+Your next commit will be signed; confirm with `git log --show-signature -1`. If
+you already pushed **unsigned** commits on your PR, re-sign the whole branch and
+force-push:
+
+```bash
+git rebase --exec "git commit --amend --no-edit -S" origin/master
+git push --force-with-lease
+```
 
 ## Questions
 

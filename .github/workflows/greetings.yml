@@ -36,6 +36,7 @@ jobs:
             - [ ] No `# noqa` / `# type: ignore` shortcuts; pre-existing violations in touched files are fixed
             - [ ] Added an entry under `## [Unreleased]` in [CHANGELOG.md](../blob/master/CHANGELOG.md)
             - [ ] Signed the [CLA](../blob/master/CLA.md) (the bot will prompt you on this PR)
+            - [ ] Signed your commits — `master` requires verified signatures ([SSH signing setup](../blob/master/CONTRIBUTING.md#signing-your-commits))
             - [ ] Updated any affected docs under `docs/`
 
             See [CONTRIBUTING.md](../blob/master/CONTRIBUTING.md) for the full workflow and the [Code of Conduct](../blob/master/CODE_OF_CONDUCT.md) for the community standards we follow.
