@@ -525,6 +525,36 @@ class Settings(BaseSettings):
         description="Banned single-word commit subjects",
     )
 
+    # Phase 5 — Autonomous Cadence & Caps.
+    # MASTER ENABLE for the autonomous work-generation (strategy) engine. This
+    # is a HARD SAFETY GATE, deliberately SEPARATE from the Goals
+    # `strategy_cadence`: even when the CEO has set a non-`off` cadence (daily /
+    # weekly), the strategy loop does NOTHING — it logs "strategy engine
+    # disabled" and no-ops — until this flag is explicitly flipped on. It
+    # DEFAULTS OFF so merging the phase cannot autonomously create a task, spawn
+    # an agent, or spend a cent. `strategy_cadence` governs *how often* the loop
+    # would run; this flag governs *whether it runs at all*. Both must say yes.
+    strategy_engine_enabled: bool = Field(
+        default=False,
+        description=(
+            "Master enable for the autonomous work-generation loop. Defaults "
+            "OFF; the loop no-ops regardless of strategy_cadence until the CEO "
+            "explicitly enables it. Override via ROBOCO_STRATEGY_ENGINE_ENABLED"
+        ),
+    )
+    # How often the strategy loop wakes to re-check whether it should run a
+    # cycle. This is just the poll granularity — the *effective* cadence
+    # (off/daily/weekly) comes from the Goals operating policy, evaluated on
+    # each tick. Kept coarse so an idle, disabled loop costs almost nothing.
+    strategy_loop_interval_seconds: int = Field(
+        default=3600,
+        ge=60,
+        description=(
+            "Poll interval (seconds) for the strategy loop's cadence check; "
+            "override via ROBOCO_STRATEGY_LOOP_INTERVAL_SECONDS"
+        ),
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

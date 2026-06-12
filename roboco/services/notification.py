@@ -123,6 +123,55 @@ class NotificationService:
             )
         )
 
+    async def send_stranded_task_notification(
+        self,
+        task_id: str,
+        reason: str,
+        to_ceo: str = "ceo",
+        from_agent: str | None = None,
+    ) -> None:
+        """Surface a stranded task to the CEO action queue — never silently idle.
+
+        Phase 5 (5.A1 — stall surfacing, INTENT.md §10 / §11 capability #8):
+        the existing detectors cover respawn loops (``send_stuck_agent_
+        notification``) and SLA drift (annotates the task), but a task that
+        lands ``blocked`` and *waits for a human* — a HITL block, an auto-block
+        from a failed step (the merge-405 / PR-base-422 we hit), a hard error,
+        or a corrupted/stuck state — has no automatic resolver. Nothing spawns
+        on it and no PM is guaranteed to look, so it can sit indefinitely while
+        the company appears idle. This emits a formal ack-required BLOCKER
+        notification to the CEO so the stranded work shows up as a recoverable
+        action item in the cockpit / queue rather than rotting in silence.
+
+        Idempotency: the caller fires this at most once per stall episode, and
+        ``_create_notification``'s purpose-based dedup (same sender + type +
+        ``related_task_id`` + recipient, still unacked) backstops it so a
+        re-fire cannot spam the CEO.
+        """
+        logger.warning(
+            "Sending stranded-task notification to CEO",
+            task_id=task_id,
+            reason=reason,
+        )
+        body = (
+            f"Task {task_id} is stranded and will not advance on its own.\n\n"
+            f"Reason: {reason}\n\n"
+            "No automatic resolver can move it — it needs you to investigate and "
+            "recover it (unblock, reassign, cancel, or fix the underlying cause). "
+            "It is surfaced here so it is recoverable rather than silently idle."
+        )
+        await self._create_notification(
+            CreateNotificationParams(
+                notification_type=NotificationType.BLOCKER_ESCALATION,
+                priority=NotificationPriority.HIGH,
+                from_agent=from_agent or "system",
+                to_agents=[to_ceo],
+                subject=f"Task stranded — needs recovery: Task {task_id}",
+                body=body,
+                related_task_id=task_id,
+            )
+        )
+
     async def send_qa_ready_notification(
         self,
         task_id: str,
@@ -367,6 +416,84 @@ class NotificationService:
                 subject=f"Pitch provisioning failed: Task {task_id}",
                 body=body,
                 related_task_id=task_id,
+            )
+        )
+
+    async def send_cap_breach_notification(
+        self,
+        cap: str,
+        detail: str,
+        from_agent: str | None = None,
+        to_ceo: str = "ceo",
+    ) -> None:
+        """Tell the CEO an autonomous strategy cycle hit an operating-policy cap.
+
+        Phase 5 (5.E2): a strategy cycle that *would* breach a cap (monthly
+        budget or max active products) does NOT proceed — exceeding a cap is a
+        gated action (INTENT.md §6). Instead of spending or minting a product
+        over the line, the cycle surfaces the breach to the CEO as an
+        ack-required action item so the human can raise the cap, pause work, or
+        re-prioritise. ``cap`` names which limit (``budget`` / ``products``);
+        ``detail`` carries the concrete numbers.
+        """
+        logger.warning(
+            "Sending cap-breach notification to CEO",
+            cap=cap,
+            detail=detail,
+        )
+        body = (
+            f"The autonomous strategy engine paused: continuing would breach the "
+            f"'{cap}' cap in your operating policy.\n\n{detail}\n\n"
+            "Exceeding a cap is gated, so the cycle stopped rather than spending "
+            "or starting work over the line. Raise the cap, pause active work, or "
+            "re-prioritise — then the next cycle will resume within the new "
+            "bounds."
+        )
+        await self._create_notification(
+            CreateNotificationParams(
+                notification_type=NotificationType.APPROVAL,
+                priority=NotificationPriority.HIGH,
+                from_agent=from_agent or "system",
+                to_agents=[to_ceo],
+                subject=f"Strategy paused — '{cap}' cap reached",
+                body=body,
+            )
+        )
+
+    async def send_need_direction_notification(
+        self,
+        detail: str,
+        from_agent: str | None = None,
+        to_ceo: str = "ceo",
+    ) -> None:
+        """Tell the CEO the company has no value-adding work left against goals.
+
+        Phase 5 (5.E3 — honest idle): when a strategy cycle finds genuinely no
+        in-bounds, value-adding work to do against the standing goals, the
+        company STOPS rather than inventing busywork (INTENT.md §5 — value-
+        driven, never activity-driven). It emits this single "need direction"
+        signal so the CEO knows to set new goals or raise a cap. Fires once per
+        idle episode; the loop re-arms it only after real work appears again.
+        """
+        logger.info(
+            "Sending need-direction notification to CEO",
+            detail=detail,
+        )
+        body = (
+            "The company has no value-adding, in-bounds work left against the "
+            f"current goals.\n\n{detail}\n\n"
+            "Rather than invent busywork, the strategy engine has gone quiet and "
+            "is asking for direction: set or sharpen a goal, adjust the operating "
+            "policy, or confirm there's nothing to do right now."
+        )
+        await self._create_notification(
+            CreateNotificationParams(
+                notification_type=NotificationType.APPROVAL,
+                priority=NotificationPriority.NORMAL,
+                from_agent=from_agent or "system",
+                to_agents=[to_ceo],
+                subject="Need direction — no value-adding work against goals",
+                body=body,
             )
         )
 

@@ -21,7 +21,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import httpx
 
@@ -564,6 +564,28 @@ class AgentOrchestrator:
         # Rate-limit probe loop: 30-second interval, scans Redis for all
         # rate-limited providers and resolves waiting agents on success.
         self._rate_limit_probe_task: asyncio.Task | None = None
+        # Phase 5 — autonomous work-generation (strategy) loop. Parallel to
+        # the dispatcher loop, but it ships DORMANT: gated behind the
+        # `strategy_engine_enabled` master switch (default OFF) AND the Goals
+        # `strategy_cadence`. Both must say yes before a cycle runs.
+        self._strategy_task: asyncio.Task | None = None
+        # Wall-clock of the last strategy cycle that actually ran, so the loop
+        # can honor the daily/weekly cadence without a real scheduler. None
+        # until the first cycle runs (or the loop has never been enabled).
+        self._last_strategy_cycle_at: datetime | None = None
+        # One-shot guard for the honest-idle "need direction" signal (5.E3):
+        # set once a need-direction notification has been emitted so the loop
+        # does not re-notify the CEO every tick while genuinely idle. Cleared
+        # when a cycle finds real work to do again.
+        self._strategy_idle_notified: bool = False
+        # Phase 5 (5.A1 — stall surfacing): task_ids already surfaced to the CEO
+        # as stranded this episode. A stranded `blocked` task (HITL block, an
+        # auto-block from a failed step, a hard error, a stuck state) has no
+        # automatic resolver, so without this it would either never reach the
+        # CEO or re-notify every dispatcher tick. Mirrors the one-shot guards
+        # above: fire ONCE per stall, and clear a task's entry once it is no
+        # longer stranded so a fresh stall re-arms the signal.
+        self._stranded_blocked_notified: set[str] = set()
         # Tracks which providers have already received a CEO notification
         # during the current rate-limit episode.  Cleared when the probe
         # succeeds and the rate limit is lifted (tracker.clear() path).
@@ -646,10 +668,15 @@ class AgentOrchestrator:
         self._dispatcher_task = asyncio.create_task(self._dispatcher_loop())
         self._sweeper_task = asyncio.create_task(self._sweeper_loop())
         self._rate_limit_probe_task = asyncio.create_task(self._rate_limit_probe_loop())
+        # Phase 5: the autonomous work-generation loop. Always started so the
+        # cadence can be enabled at runtime without a restart — but it no-ops
+        # until BOTH the master switch and the Goals cadence say go.
+        self._strategy_task = asyncio.create_task(self._strategy_loop())
 
         logger.info(
             "Orchestrator started",
             dispatcher_interval=self.dispatcher_interval,
+            strategy_engine_enabled=settings.strategy_engine_enabled,
             internal_api_url=self._api_url,
         )
 
@@ -677,6 +704,11 @@ class AgentOrchestrator:
             self._rate_limit_probe_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._rate_limit_probe_task
+
+        if self._strategy_task:
+            self._strategy_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._strategy_task
 
         # Stop all agents
         for agent_id in list(self._instances.keys()):
@@ -4191,6 +4223,512 @@ Start by:
             )
 
     # =========================================================================
+    # STRATEGY ENGINE — AUTONOMOUS WORK-GENERATION LOOP (Phase 5)
+    #
+    # SAFETY: this loop ships DORMANT. It is double-gated:
+    #   1. settings.strategy_engine_enabled — the explicit master switch, OFF
+    #      by default. While OFF the loop logs "strategy engine disabled" and
+    #      no-ops EVERY tick, regardless of the Goals cadence.
+    #   2. Goals.operating_policy.strategy_cadence — off / daily / weekly. Even
+    #      with the master switch ON, `off` runs nothing and daily/weekly only
+    #      fire once their interval has elapsed.
+    # Merging this phase must NOT create a task, spawn an agent, or spend a cent
+    # autonomously. Both gates must say go before a cycle runs.
+    # =========================================================================
+
+    # Cadence value -> minimum seconds between cycles. `off` is handled before
+    # this map is consulted (it means "never autonomously").
+    _STRATEGY_CADENCE_SECONDS: ClassVar[dict[str, int]] = {
+        "daily": 24 * 60 * 60,
+        "weekly": 7 * 24 * 60 * 60,
+    }
+
+    async def _strategy_loop(self) -> None:
+        """Background loop: on its cadence, run ONE autonomous decision cycle.
+
+        Parallel to ``_dispatcher_loop`` but for *originating* work rather than
+        dispatching existing work. It wakes on a coarse poll
+        (``strategy_loop_interval_seconds``) and on each wake calls
+        ``_strategy_tick``, which enforces the double safety gate (master switch
+        + cadence) before doing anything. Mirrors ``_rate_limit_probe_loop``'s
+        shape: sleep, tick, swallow-and-log on error so one bad cycle can't kill
+        the loop.
+        """
+        interval = settings.strategy_loop_interval_seconds
+        while self._running:
+            try:
+                await asyncio.sleep(interval)
+                await self._strategy_tick()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Strategy loop error", error=str(e))
+
+    async def _strategy_tick(self) -> None:
+        """One poll of the strategy loop. Enforces the double safety gate.
+
+        Order is deliberate and load-bearing:
+        1. MASTER SWITCH first — if ``strategy_engine_enabled`` is OFF, log
+           "strategy engine disabled" and return immediately. Nothing below
+           runs. This is the non-negotiable dormant-by-default guarantee.
+        2. Cadence — read ``strategy_cadence`` from the live Goals operating
+           policy. ``off`` (or unset) means human-triggered only: no-op.
+        3. Interval — daily/weekly only fire once the elapsed time since the
+           last cycle clears the cadence window.
+        4. Caps (5.E2) — before any generation, enforce budget + active-product
+           caps; a would-be breach surfaces to the CEO and stops the cycle.
+        5. Run one cycle.
+        """
+        if not settings.strategy_engine_enabled:
+            # DORMANT: the master switch is off. No DB read, no generation, no
+            # spawn, no spend — just an observable heartbeat that the gate held.
+            logger.info("strategy engine disabled")
+            return
+
+        from roboco.db.base import get_session_factory
+        from roboco.models.business_goals import OperatingPolicy
+        from roboco.services.business_goals import get_business_goals_service
+
+        session_factory = get_session_factory()
+        async with session_factory() as db:
+            goals = await get_business_goals_service(db).get_or_initialize()
+            policy = OperatingPolicy.model_validate(goals.operating_policy)
+            cadence = str(policy.strategy_cadence)
+
+            if cadence == "off" or cadence not in self._STRATEGY_CADENCE_SECONDS:
+                logger.info("strategy cadence off; skipping cycle", cadence=cadence)
+                return
+
+            if not self._strategy_cadence_elapsed(cadence):
+                logger.debug(
+                    "strategy cadence not yet elapsed; skipping cycle",
+                    cadence=cadence,
+                )
+                return
+
+            # 5.E2 — caps gate. A breach surfaces to the CEO and stops the cycle
+            # WITHOUT generating or spawning anything.
+            if not await self._strategy_caps_ok(db, policy):
+                return
+
+            # Both gates passed and we're within caps: run exactly one cycle.
+            self._last_strategy_cycle_at = datetime.now(UTC)
+            await self._run_strategy_cycle(db, goals, policy)
+
+    def _strategy_cadence_elapsed(self, cadence: str) -> bool:
+        """True if enough time has passed since the last cycle for ``cadence``.
+
+        The very first cycle (no prior run this process) always passes — there
+        is no scheduler, just an elapsed-time check against the in-memory
+        timestamp of the last cycle.
+        """
+        if self._last_strategy_cycle_at is None:
+            return True
+        window = self._STRATEGY_CADENCE_SECONDS[cadence]
+        elapsed = (datetime.now(UTC) - self._last_strategy_cycle_at).total_seconds()
+        return elapsed >= window
+
+    async def _strategy_caps_ok(self, db: Any, policy: Any) -> bool:
+        """Enforce the operating-policy caps before any generation (5.E2).
+
+        Two caps from the Goals operating policy:
+        - ``monthly_budget_usd`` — projected monthly spend must stay under it.
+          Reuses the same usage plumbing the sweeper / Secretary already use
+          (``UsageService.get_projection``), so the number matches the cockpit.
+        - ``max_active_products`` — the count of registered products must stay
+          under it (a new-product cycle would add one).
+
+        A cap that is already met or breached is a *gated* condition: instead of
+        proceeding (and potentially spending or minting a product over the
+        line), surface it to the CEO once and return False so the cycle stops.
+        Returns True only when both caps have headroom.
+        """
+        from roboco.services.notification import NotificationService
+        from roboco.services.product import get_product_service
+        from roboco.services.usage import get_usage_service
+
+        # Budget cap. budget == 0 is treated as "no spend allowed": any projected
+        # spend at all breaches it; the projection is the same one the cockpit
+        # shows, so this is consistent with what the CEO sees.
+        budget = int(policy.monthly_budget_usd)
+        projection = await get_usage_service(db).get_projection()
+        projected = float(projection.get("projected_monthly_cost_usd", 0.0))
+        if budget <= 0 or projected >= budget:
+            await NotificationService().send_cap_breach_notification(
+                cap="budget",
+                detail=(
+                    f"Projected monthly spend ${projected:.2f} vs cap "
+                    f"${budget}. The cycle did not generate or spawn anything."
+                ),
+            )
+            logger.warning(
+                "strategy cycle halted at budget cap",
+                projected=projected,
+                budget=budget,
+            )
+            return False
+
+        # Active-product cap. Products are not status-scoped today, so every
+        # registered product counts as active (INTENT.md treats max-active as a
+        # concurrency ceiling). A cycle that could stand up a new product must
+        # leave room for one.
+        products = await get_product_service(db).list_all(limit=1000)
+        active = len(products)
+        max_products = int(policy.max_active_products)
+        if active >= max_products:
+            await NotificationService().send_cap_breach_notification(
+                cap="products",
+                detail=(
+                    f"Active products {active} vs cap {max_products}. The cycle "
+                    "did not start a new product line."
+                ),
+            )
+            logger.warning(
+                "strategy cycle halted at product cap",
+                active=active,
+                max_products=max_products,
+            )
+            return False
+
+        return True
+
+    async def _strategy_has_real_backlog(self, db: Any) -> bool:
+        """False-idle guard for honest idle (5.E3).
+
+        Honest idle must be *real*: the company only declares "no work" when
+        there is genuinely nothing in flight. Any task in a non-terminal status
+        (anything other than ``completed`` / ``cancelled``) is live backlog the
+        delivery engine is still working — declaring idle then would be a false
+        idle. Uses the cheap ``count_by_status`` aggregate.
+        """
+        from roboco.models.base import TaskStatus
+        from roboco.services.task import TaskService
+
+        counts = await TaskService(db).count_by_status()
+        terminal = {TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value}
+        return any(n > 0 for status, n in counts.items() if status not in terminal)
+
+    async def _run_strategy_cycle(self, db: Any, goals: Any, policy: Any) -> None:
+        """Run ONE autonomous decision cycle (the loop body).
+
+        The generation logic itself — assess goals vs. state, find the highest-
+        leverage gap, and originate work — lives in ``_strategy_generate``
+        (Track D, 5.D1/5.D2). This body (Track E) provides the surrounding
+        machinery: it is reached only after both safety gates and the caps gate
+        have passed, and it owns the honest-idle decision (5.E3). It is still
+        unreachable with default config — the master switch (default OFF) blocks
+        it upstream in ``_strategy_tick``, so nothing here can run until the CEO
+        explicitly enables the engine.
+        """
+        generated = await self._strategy_generate(db, goals, policy)
+        if generated > 0:
+            # Real work originated this cycle — re-arm the idle signal so a
+            # later genuine idle can notify again.
+            self._strategy_idle_notified = False
+            logger.info("strategy cycle generated work", count=generated)
+            return
+
+        # Nothing generated. Distinguish honest idle from a transient lull:
+        # only declare idle (and notify) when there is no live backlog either.
+        if await self._strategy_has_real_backlog(db):
+            logger.info(
+                "strategy cycle generated no new work; live backlog remains (not idle)"
+            )
+            return
+
+        # 5.E3 — honest idle. No new work AND no backlog: surface ONE
+        # need-direction signal to the CEO, then stay quiet until work returns.
+        if self._strategy_idle_notified:
+            logger.debug("strategy idle; CEO already notified this episode")
+            return
+        from roboco.services.notification import NotificationService
+
+        await NotificationService().send_need_direction_notification(
+            detail=(
+                "A strategy cycle found no value-adding, in-bounds work to "
+                "originate against the active goals, and no live backlog "
+                "remains."
+            ),
+        )
+        self._strategy_idle_notified = True
+
+    # -------------------------------------------------------------------------
+    # TRACK D — DECISION LOGIC (5.D1) + ROUTING (5.D2)
+    #
+    # Implemented as BOUNDED, DETERMINISTIC HEURISTICS rather than a spawned
+    # "strategist" agent. Justification (the spawn path is the alternative the
+    # plan allows):
+    #   * The loop body must return a concrete count synchronously and must be
+    #     unit-testable WITHOUT running anything live — a spawned LLM agent is
+    #     neither deterministic nor offline-testable, and a fire-and-forget
+    #     spawn can't report how many items it originated.
+    #   * The non-negotiable safety story (dormant-by-default, no autonomous
+    #     spend, the gate actually holds) is provable by construction here: the
+    #     code can only call ``create_pitch`` (which lands GATED in the CEO
+    #     queue) or ``TaskService.create`` for an in-bounds task on an existing
+    #     repo — it has no path to provision, spawn, or spend.
+    #   * One item per cycle keeps spend and concurrency bounded by design; the
+    #     loop's own cadence (daily/weekly) governs the rate.
+    # A future iteration can swap this heuristic for a spawned strategist behind
+    # the SAME entry point without touching the loop or the safety gates.
+    # -------------------------------------------------------------------------
+
+    # The system identity that authors autonomously-generated work. Mirrors the
+    # "system" sentinel the orchestrator already uses for generated rows.
+    _STRATEGY_AUTHOR_SLUG: ClassVar[str] = "product-owner"
+
+    async def _strategy_generate(
+        self,
+        db: Any,
+        goals: Any,
+        policy: Any,
+    ) -> int:
+        """Run the assess -> find-gap -> generate decision cycle (5.D1 + 5.D2).
+
+        Deterministic and bounded: at most ONE work item is originated per
+        cycle. The body is:
+
+        1. **Assess** — read the active objectives off ``goals`` and the live
+           drift signal (objectives with no in-flight work behind them) via the
+           Secretary read surface (``SecretaryService._drift_signals``), reusing
+           the cockpit's own derived metrics rather than recomputing them.
+        2. **Find the gap** — the highest-leverage uncovered objective is the
+           active objective with the lowest ``priority`` value that has no
+           in-flight work. If every objective already has work behind it, there
+           is no gap this cycle (return 0 -> the caller's honest-idle path runs).
+        3. **Generate + route (5.D2)** — turn that objective into exactly one
+           work item and route it by the autonomy line:
+             * NEW-PRODUCT work (no product line exists yet to serve the
+               objective) flows through the Phase 4 pitch path
+               (``TaskService.create_pitch``). It lands GATED in the CEO
+               Approve & Start queue and is NEVER auto-provisioned.
+             * IN-BOUNDS work (maintenance / research / iteration on an existing
+               product) flows straight to the delivery engine via
+               ``TaskService.create``.
+           ``propose_only`` autonomy surfaces even in-bounds work to the CEO
+           instead of running it; ``full`` still gates the hard gates (new
+           product line) because INTENT.md §6 keeps the product gate regardless.
+
+        Returns the count of items originated (0 or 1).
+        """
+        from roboco.models.base import AutonomyLevel
+        from roboco.models.business_goals import Objective
+
+        # 1. ASSESS — active objectives, highest priority first (lower == higher).
+        objectives = [Objective.model_validate(o) for o in (goals.objectives or [])]
+        active = sorted(
+            (o for o in objectives if o.status.value == "active"),
+            key=lambda o: o.priority,
+        )
+        if not active:
+            # No standing direction to pursue. Not the engine's job to invent a
+            # goal — that's the honest-idle / need-direction path upstream.
+            logger.info("strategy: no active objectives; nothing to originate")
+            return 0
+
+        # 2. FIND THE GAP — the top-priority objective with NO work behind it.
+        # We reuse the company-wide drift signal as the coverage proxy: if there
+        # is genuinely no in-flight work at all, the top objective is uncovered;
+        # if work is already in flight, we treat the standing backlog as serving
+        # the objectives and originate nothing (the delivery engine is busy).
+        from roboco.services.secretary import get_secretary_service
+
+        drift = await get_secretary_service(db)._drift_signals(goals)
+        if drift["in_flight_tasks"] > 0:
+            logger.info(
+                "strategy: objectives already have work in flight; no new gap",
+                in_flight=drift["in_flight_tasks"],
+                active_objectives=drift["active_objectives"],
+            )
+            return 0
+
+        gap = active[0]
+        autonomy = str(policy.autonomy_level)
+
+        # 3. GENERATE + ROUTE.
+        # Does a product line already exist that this objective can iterate on?
+        # With none, the highest-leverage move against the objective is to stand
+        # up a new product — which is gated. With one or more, we originate
+        # in-bounds iteration/research work on an existing repo.
+        from roboco.services.product import get_product_service
+
+        products = await get_product_service(db).list_all(limit=1)
+        has_product = bool(products)
+
+        if not has_product:
+            return await self._strategy_route_new_product(db, gap, autonomy)
+        return await self._strategy_route_in_bounds(db, gap, autonomy, AutonomyLevel)
+
+    async def _strategy_route_new_product(
+        self,
+        db: Any,
+        objective: Any,
+        autonomy: str,
+    ) -> int:
+        """Route NEW-PRODUCT work through the GATED Phase 4 pitch path (5.D2).
+
+        A pitch is born ``PENDING`` + ``board_review_complete=True`` (the CEO
+        Approve & Start queue's exact shape) and carries NO project/product, so
+        approval — never this cycle — triggers provisioning. Greenlighting a new
+        product line is gated under EVERY autonomy level (INTENT.md §6 keeps the
+        product gate even at ``full``), so this always reaches the human and
+        never spends or provisions autonomously.
+        """
+        from roboco.foundation.identity import AGENTS
+        from roboco.models.task import PitchCreateRequest
+        from roboco.services.prompter import compose_description
+        from roboco.services.task import TaskService
+
+        author = AGENTS[self._STRATEGY_AUTHOR_SLUG].uuid
+        title = f"New product line for objective: {objective.title}"
+        rationale = (
+            "Autonomously originated by the strategy engine: the active "
+            f"objective '{objective.title}' has no product line serving it yet. "
+            "This pitch is GATED — it lands in your Approve & Start queue and "
+            "provisions nothing until you approve it."
+        )
+        what_this_builds = [
+            objective.description or objective.title,
+        ]
+        the_work: list[dict[str, Any]] = []
+        notes = [
+            "Generated by the autonomous strategy engine (Phase 5, gated path).",
+        ]
+        success_criteria = [
+            f"Delivers measurable progress on objective '{objective.title}'.",
+        ]
+        if objective.metric and objective.target:
+            success_criteria.append(
+                f"Moves '{objective.metric}' toward '{objective.target}'."
+            )
+
+        description = compose_description(
+            {
+                "objective": objective.title,
+                "what_this_builds": what_this_builds,
+                "the_work": the_work,
+                "notes": [*notes, f"Rationale: {rationale}"],
+                "acceptance_criteria": success_criteria,
+                "description": objective.description or objective.title,
+            }
+        )
+        await TaskService(db).create_pitch(
+            PitchCreateRequest(
+                title=title,
+                description=description,
+                acceptance_criteria=success_criteria,
+                created_by=author,
+                objective=objective.title,
+                what_this_builds=what_this_builds,
+                the_work=the_work,
+                notes=notes,
+                rationale=rationale,
+            )
+        )
+        logger.info(
+            "strategy: originated GATED new-product pitch",
+            objective=objective.title,
+            autonomy=autonomy,
+        )
+        return 1
+
+    async def _strategy_route_in_bounds(
+        self,
+        db: Any,
+        objective: Any,
+        autonomy: str,
+        autonomy_level_cls: Any,
+    ) -> int:
+        """Route IN-BOUNDS iteration/research work to the delivery engine (5.D2).
+
+        In-bounds kinds (maintenance, research, iteration on a shipped product)
+        run without CEO approval under ``gated``/``full``, straight to delivery
+        via ``TaskService.create``. Under ``propose_only`` autonomy the CEO sees
+        everything and the company acts on nothing, so even this work is
+        surfaced as a CEO action item instead of started. The task targets an
+        EXISTING product's primary repo — it cannot spend, provision, or breach
+        a cap (caps were already cleared upstream in ``_strategy_caps_ok``).
+        """
+        # propose_only: surface, do not act. Honour the tightest leash.
+        if autonomy == autonomy_level_cls.PROPOSE_ONLY.value:
+            from roboco.services.notification import NotificationService
+
+            await NotificationService().send_need_direction_notification(
+                detail=(
+                    "Autonomy is set to propose_only, so the strategy engine "
+                    "surfaces work instead of starting it. Proposed in-bounds "
+                    f"work: iterate on objective '{objective.title}'. Approve a "
+                    "looser autonomy level to let the company run it."
+                ),
+            )
+            logger.info(
+                "strategy: propose_only — surfaced in-bounds work instead of running",
+                objective=objective.title,
+            )
+            return 0
+
+        # Resolve an existing product's backend repo as the work target. With a
+        # product present (the caller's precondition), there is a project to aim
+        # at; if the mapping is somehow empty, fall back to the first project.
+        from roboco.foundation.identity import AGENTS, Team
+        from roboco.models.base import (
+            Complexity,
+            TaskNature,
+            TaskStatus,
+            TaskType,
+        )
+        from roboco.models.task import TaskCreateRequest
+        from roboco.services.product import get_product_service
+        from roboco.services.project import get_project_service
+        from roboco.services.task import TaskService
+
+        product = (await get_product_service(db).list_all(limit=1))[0]
+        project_id = await get_product_service(db).project_for(
+            cast("UUID", product.id), Team.BACKEND
+        )
+        if project_id is None:
+            projects = await get_project_service(db).list_all(active_only=True, limit=1)
+            if not projects:
+                # No repo to target — cannot originate in-bounds work safely.
+                logger.info(
+                    "strategy: no project to target for in-bounds work; skipping",
+                    objective=objective.title,
+                )
+                return 0
+            project_id = cast("UUID", projects[0].id)
+
+        author = AGENTS[self._STRATEGY_AUTHOR_SLUG].uuid
+        await TaskService(db).create(
+            TaskCreateRequest(
+                title=f"Advance objective: {objective.title}",
+                description=(
+                    "Autonomously originated by the strategy engine (Phase 5, "
+                    "in-bounds path). Iterate on the existing product to make "
+                    f"progress on the active objective '{objective.title}'."
+                    + (f"\n\n{objective.description}" if objective.description else "")
+                ),
+                acceptance_criteria=[
+                    f"Demonstrable progress on objective '{objective.title}'.",
+                ],
+                team=Team.BACKEND,
+                created_by=author,
+                task_type=TaskType.RESEARCH,
+                nature=TaskNature.NON_TECHNICAL,
+                estimated_complexity=Complexity.MEDIUM,
+                project_id=project_id,
+                status=TaskStatus.PENDING,
+                source="strategy_engine",
+            )
+        )
+        logger.info(
+            "strategy: originated in-bounds delivery work",
+            objective=objective.title,
+            project_id=str(project_id),
+            autonomy=autonomy,
+        )
+        return 1
+
+    # =========================================================================
     # RATE-LIMIT PROBE LOOP
     # =========================================================================
 
@@ -7037,6 +7575,120 @@ Never `commit`, never write code, never run `git`. PMs coordinate.
         # sweep above — different states, different action (escalate vs
         # auto-block).
         await self._detect_sla_exceeded(client)
+
+        # Stall surfacing (5.A1). Independent from both sweeps above: those act
+        # on `pending`/in-state drift, this surfaces `blocked` tasks that have
+        # no automatic resolver to the CEO action queue.
+        await self._detect_stranded_blocked(client)
+
+    # Grace before a HITL-blocked task is surfaced — long enough that a normal
+    # block→human-resolve transition mid-flight isn't reported as stranded, but
+    # short enough that a genuinely-waiting task reaches the CEO promptly.
+    _STRANDED_HITL_GRACE_SECONDS: ClassVar[int] = 5 * 60
+    # A non-HITL blocked task is worked by `_dispatch_blocker_work`; only treat
+    # it as stranded once it has sat blocked well past that resolver's chance to
+    # move it (covers a failed step / hard error / stuck state with no progress).
+    _STRANDED_BLOCKED_SECONDS: ClassVar[int] = 30 * 60
+
+    def _blocked_strand_reason(self, task: dict[str, Any]) -> str | None:
+        """Why ``task`` is stranded, or None if it is still recoverable on its own.
+
+        A ``blocked`` task is stranded when nothing automatic will advance it:
+
+        * **HITL block** (``blocker_resolver_type == "human"``) — by design no
+          agent ever spawns on it; it waits for a human. Surfaced after a short
+          grace so an in-flight transition isn't misread as a stall.
+        * **No resolver** — ``_blocker_resolver_slug`` finds no PM/board/cell
+          agent to dispatch (e.g. a coordination task with no team). Nothing can
+          pick it up, so once it has aged it is stranded.
+        * **Stale block** — a resolver exists but the task has sat blocked far
+          past the resolver's window without moving (a failed step like the
+          merge-405 / PR-base-422, a hard error, a corrupted/stuck state).
+
+        Uses ``_time_in_state`` (time since last update) as the age proxy, the
+        same coarse-but-safe signal the SLA sweep uses; it under-counts, biasing
+        toward "still working" rather than crying stall prematurely.
+        """
+        age = self._time_in_state(task)
+        age_s = age.total_seconds() if age is not None else 0.0
+        if self._is_hitl_blocked(task):
+            if age_s < self._STRANDED_HITL_GRACE_SECONDS:
+                return None
+            return "blocked awaiting human resolution (no automatic resolver)"
+        if self._blocker_resolver_slug(task) is None:
+            if age_s < self._STRANDED_HITL_GRACE_SECONDS:
+                return None
+            return "blocked with no resolver agent to dispatch"
+        if age_s >= self._STRANDED_BLOCKED_SECONDS:
+            mins = int(age_s // 60)
+            return (
+                f"blocked for {mins} minutes without advancing — the automatic "
+                "resolver has not moved it (likely a failed step or stuck state)"
+            )
+        return None
+
+    async def _detect_stranded_blocked(self, client: httpx.AsyncClient) -> None:
+        """Surface stranded ``blocked`` tasks to the CEO action queue (5.A1).
+
+        Generalises the existing stall detectors so ANY stranded work reaches
+        the CEO and is recoverable, never silently idle (INTENT.md §10). The
+        respawn-loop guard (``_pm_respawn_should_gate``) and the SLA sweep cover
+        agents that are *running but not advancing*; this covers tasks parked in
+        ``blocked`` with no automatic path forward — HITL blocks, auto-blocks
+        from a failed step (merge-405 / PR-base-422), hard errors, stuck states.
+
+        One-shot, like the sibling guards: a stranded task is notified exactly
+        once per stall episode (in-memory ``_stranded_blocked_notified``, backed
+        by the notification layer's purpose-dedup). A task that leaves ``blocked``
+        (recovered) drops out of the set, so a *fresh* stall re-arms the signal.
+        Best-effort: a notification failure must not wedge the dispatcher.
+        """
+        try:
+            tasks = await self._fetch_tasks(client, "blocked")
+        except Exception as e:
+            logger.debug("stranded-blocked fetch failed; skipping", error=str(e))
+            return
+
+        still_stranded: set[str] = set()
+        for task in tasks:
+            task_id = task.get("id")
+            if not task_id:
+                continue
+            task_id = str(task_id)
+            reason = self._blocked_strand_reason(task)
+            if reason is None:
+                continue
+            still_stranded.add(task_id)
+            if task_id in self._stranded_blocked_notified:
+                # Already surfaced this episode; don't re-notify each tick.
+                continue
+            self._stranded_blocked_notified.add(task_id)
+            await self._notify_stranded_task(task_id, reason)
+
+        # Re-arm: any previously-stranded task no longer in `blocked` (recovered,
+        # cancelled, or advanced) leaves the set so a future stall notifies anew.
+        self._stranded_blocked_notified &= still_stranded
+
+    async def _notify_stranded_task(self, task_id: str, reason: str) -> None:
+        """One-shot CEO alert that a blocked task is stranded and recoverable.
+
+        Best-effort, mirroring ``_notify_stuck_agent``: a notification failure
+        is logged and swallowed so it cannot wedge the dispatcher loop.
+        """
+        from roboco.services.notification import NotificationService
+
+        try:
+            await NotificationService().send_stranded_task_notification(
+                task_id=task_id,
+                reason=reason,
+                to_ceo="ceo",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to send stranded-task notification",
+                task_id=task_id,
+                error=str(exc),
+            )
 
     async def _check_sla_for_task(
         self,
