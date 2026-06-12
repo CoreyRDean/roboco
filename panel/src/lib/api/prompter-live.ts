@@ -35,6 +35,7 @@ export type LiveEventKind =
   | "turn_end"
   | "system"
   | "draft"
+  | "goal_edit"
   | "error";
 
 /** One normalized event from the agent's live reply. */
@@ -54,6 +55,7 @@ export const LIVE_EVENT_KINDS: LiveEventKind[] = [
   "turn_end",
   "system",
   "draft",
+  "goal_edit",
   "error",
 ];
 

@@ -227,15 +227,35 @@ async def test_start_unknown_project_404(start_client: dict) -> None:
 
 
 @pytest.mark.asyncio
-async def test_start_requires_exactly_one_scope(start_client: dict) -> None:
+async def test_start_rejects_both_scopes(start_client: dict) -> None:
     client = start_client["client"]
     both = await client.post(
         "/api/prompter/live/start",
         json={"project_id": str(uuid4()), "product_id": str(uuid4())},
     )
     assert both.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
-    neither = await client.post("/api/prompter/live/start", json={})
-    assert neither.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+@pytest.mark.asyncio
+async def test_start_scopeless_opens_free_chat(start_client: dict) -> None:
+    # No scope = the Secretary's default scopeless free chat (INTENT.md §3): the
+    # session spawns with neither slug, and the agent acts through its
+    # company-wide read/action tools rather than a cloned repo.
+    client, orch = start_client["client"], start_client["orch"]
+    resp = await client.post(
+        "/api/prompter/live/start", json={"initial_message": "how are we doing?"}
+    )
+    assert resp.status_code == HTTPStatus.CREATED
+    session_id = resp.json()["session_id"]
+    assert session_id
+    assert orch.spawned == [
+        {
+            "session_id": session_id,
+            "project_slug": None,
+            "product_id": None,
+            "initial_message": "how are we doing?",
+        }
+    ]
 
 
 @pytest.mark.asyncio

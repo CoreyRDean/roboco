@@ -19,7 +19,9 @@ from roboco.api.schemas.business_goals import (
     business_goals_to_response,
 )
 from roboco.api.schemas.secretary import (
+    AnnounceRequest,
     GoalEditRequest,
+    MessageAgentRequest,
     RelayRequest,
     RelayResponse,
 )
@@ -80,6 +82,78 @@ async def relay_directive(
         ceo_agent_id=agent.agent_id,
         directive=data.directive,
         recipients=data.recipients,
+    )
+    return RelayResponse(
+        executed=outcome.executed,
+        gated=outcome.gated,
+        gate=outcome.gate,
+        recipients=outcome.recipients,
+        detail=outcome.detail,
+    )
+
+
+@router.get("/surface")
+async def get_surface(
+    db: DbSession,
+    _agent: CurrentAgentContext,
+) -> dict[str, Any]:
+    """What needs the CEO right now: human blockers + unacked CEO signals."""
+    service = get_secretary_service(db)
+    return await service.surface()
+
+
+@router.post("/message-agent", response_model=RelayResponse)
+async def message_agent(
+    data: MessageAgentRequest,
+    db: DbSession,
+    agent: CurrentAgentContext,
+) -> RelayResponse:
+    """DM/nudge a single agent on the CEO's behalf — or gate it back.
+
+    CEO-only: the Secretary speaks for the CEO. Gate-checked like a relay, so a
+    nudge that reads like a gated action becomes a CEO action item.
+    """
+    if agent.role != AgentRole.CEO:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the CEO can message agents through the Secretary",
+        )
+    service = get_secretary_service(db)
+    outcome = await service.nudge_agent(
+        ceo_agent_id=agent.agent_id,
+        agent=data.agent,
+        message=data.message,
+    )
+    return RelayResponse(
+        executed=outcome.executed,
+        gated=outcome.gated,
+        gate=outcome.gate,
+        recipients=outcome.recipients,
+        detail=outcome.detail,
+    )
+
+
+@router.post("/announce", response_model=RelayResponse)
+async def announce(
+    data: AnnounceRequest,
+    db: DbSession,
+    agent: CurrentAgentContext,
+) -> RelayResponse:
+    """Post a CEO announcement to a company channel — or gate it back.
+
+    CEO-only. Gate-checked: an announcement that reads like a gated action is
+    surfaced to the CEO action queue rather than broadcast.
+    """
+    if agent.role != AgentRole.CEO:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the CEO can announce through the Secretary",
+        )
+    service = get_secretary_service(db)
+    outcome = await service.announce(
+        ceo_agent_id=agent.agent_id,
+        channel=data.channel,
+        message=data.message,
     )
     return RelayResponse(
         executed=outcome.executed,

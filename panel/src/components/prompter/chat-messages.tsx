@@ -7,14 +7,23 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 import { CopyButton } from "@/components/ui/copy-button";
+import type { BusinessGoalsUpdate } from "@/types";
 import type { ChatMessage, StartRoute } from "@/hooks/use-prompter";
 import { DraftProposalCard } from "./draft-proposal-card";
+import { GoalEditCard } from "./goal-edit-card";
 
 interface ChatMessagesProps {
   messages: ChatMessage[];
   onStart: (route: StartRoute) => void;
   onKeepChatting: () => void;
   isLaunching?: boolean;
+  /** Apply a Secretary-proposed goal edit (CEO confirm → PUT /goals). */
+  onConfirmGoalEdit: (messageId: string, patch: BusinessGoalsUpdate) => void;
+  onDismissGoalEdit: (messageId: string) => void;
+  /** Id of the message whose goal-edit confirm is mid-flight, if any. */
+  confirmingGoalEditId?: string | null;
+  /** Empty-state hint when the conversation hasn't started yet. */
+  emptyState?: ReactNode;
 }
 
 /** Raw text of a fenced code block — the <pre>'s <code> child's string content. */
@@ -65,6 +74,10 @@ export function ChatMessages({
   onStart,
   onKeepChatting,
   isLaunching,
+  onConfirmGoalEdit,
+  onDismissGoalEdit,
+  confirmingGoalEditId,
+  emptyState,
 }: ChatMessagesProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -76,11 +89,15 @@ export function ChatMessages({
   if (messages.length === 0) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center text-muted-foreground px-8">
-        <p className="text-lg font-semibold">What would you like to build?</p>
-        <p className="text-sm max-w-md">
-          Describe your task idea. I&apos;ll help you refine it into a structured task with acceptance
-          criteria ready to hand off to the team.
-        </p>
+        {emptyState ?? (
+          <>
+            <p className="text-lg font-semibold">How can I help?</p>
+            <p className="text-sm max-w-md">
+              Ask how things are going, set a goal, nudge an agent, or describe
+              work you want done — I&apos;ll handle it or bring it to you.
+            </p>
+          </>
+        )}
       </div>
     );
   }
@@ -110,20 +127,26 @@ export function ChatMessages({
         }
 
         // Assistant message
+        const hasCard = Boolean(msg.draft || msg.goalEdit);
         return (
           <div key={msg.id} className="flex flex-col gap-2">
-            <div className="flex justify-start">
-              <div
-                className={cn(
-                  "max-w-[70%] rounded-2xl rounded-tl-sm bg-muted px-4 py-3 text-sm text-foreground",
-                  msg.draft && "max-w-[85%]"
-                )}
-              >
-                <MarkdownBody content={msg.content} />
+            {/* Render the text bubble only when there's actual content — a
+                card-only message (draft / goal-edit) or a now-cleared card would
+                otherwise show a blank pill. */}
+            {msg.content.trim() && (
+              <div className="flex justify-start">
+                <div
+                  className={cn(
+                    "max-w-[70%] rounded-2xl rounded-tl-sm bg-muted px-4 py-3 text-sm text-foreground",
+                    hasCard && "max-w-[85%]"
+                  )}
+                >
+                  <MarkdownBody content={msg.content} />
+                </div>
               </div>
-            </div>
+            )}
 
-            {/* Inline draft proposal card when LLM offers a draft */}
+            {/* Inline draft proposal card when the Secretary offers a draft */}
             {msg.draft && (
               <div className="flex justify-start">
                 <div className="w-full max-w-[85%]">
@@ -132,6 +155,20 @@ export function ChatMessages({
                     onKeepChatting={onKeepChatting}
                     onStart={onStart}
                     isLaunching={isLaunching}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Inline goal-edit confirm card when the Secretary proposes one */}
+            {msg.goalEdit && (
+              <div className="flex justify-start">
+                <div className="w-full max-w-[85%]">
+                  <GoalEditCard
+                    patch={msg.goalEdit}
+                    onConfirm={() => onConfirmGoalEdit(msg.id, msg.goalEdit!)}
+                    onDismiss={() => onDismissGoalEdit(msg.id)}
+                    isConfirming={confirmingGoalEditId === msg.id}
                   />
                 </div>
               </div>

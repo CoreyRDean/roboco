@@ -184,6 +184,16 @@ class TestIntakeScopeSlugs:
                 product_id="33333333-3333-3333-3333-333333333333",
             )
 
+    @pytest.mark.asyncio
+    async def test_clone_scope_scopeless_returns_root_and_no_clone(self) -> None:
+        # Neither scope = the Secretary's default free chat: clone nothing, cwd at
+        # the workspaces root. It must NOT call _intake_scope_slugs (which requires
+        # a product) — verified by it not raising despite no product/project.
+        orch = _make_minimal_orchestrator()
+        cwd, paths = await orch._clone_intake_scope(None, None)
+        assert cwd == "/data/workspaces"
+        assert paths == []
+
 
 # ---------------------------------------------------------------------------
 # spawn_intake_session / reap_intake_session — orchestration (docker mocked).
@@ -265,12 +275,26 @@ class TestSpawnIntakeSession:
         assert "ROBOCO_WORKSPACE=/data/workspaces/roboco/board/intake-1" in run_calls[0]
 
     @pytest.mark.asyncio
-    async def test_scope_must_be_exactly_one(self) -> None:
+    async def test_scope_rejects_both_at_once(self) -> None:
         orch = _make_minimal_orchestrator()
-        with pytest.raises(ValueError, match="exactly one"):
+        with pytest.raises(ValueError, match="at most one"):
             await orch.spawn_intake_session("s", project_slug="roboco", product_id="p")
-        with pytest.raises(ValueError, match="exactly one"):
-            await orch.spawn_intake_session("s")
+
+    @pytest.mark.asyncio
+    async def test_scopeless_spawns_without_raising(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Neither scope = the Secretary's default free chat: it spawns rather than
+        # rejecting (the cwd/no-clone behavior is covered by the
+        # _clone_intake_scope unit test below).
+        orch = _make_minimal_orchestrator()
+        run_calls: list[list[str]] = []
+        _wire_spawn_mocks(monkeypatch, orch, run_calls)
+
+        instance = await orch.spawn_intake_session("sess-free")
+
+        assert orch._instances[INTAKE_AGENT_ID] is instance
+        assert prompter_live.get_live_registry().get("sess-free") is not None
 
     @pytest.mark.asyncio
     async def test_spawn_reaps_prior_session_first(
@@ -337,9 +361,9 @@ class TestStartIntakeSession:
         assert spawned == ["sess-A"]
 
     @pytest.mark.asyncio
-    async def test_rejects_bad_scope(self) -> None:
+    async def test_rejects_both_scopes(self) -> None:
         orch = _make_minimal_orchestrator()
-        with pytest.raises(ValueError, match="exactly one"):
+        with pytest.raises(ValueError, match="at most one"):
             await orch.start_intake_session("s", project_slug="r", product_id="p")
 
 

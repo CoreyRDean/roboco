@@ -424,6 +424,111 @@ class SecretaryService(BaseService):
             detail=f"Relayed to {', '.join(delivered) or '(none)'}.",
         )
 
+    async def nudge_agent(
+        self,
+        *,
+        ceo_agent_id: UUID,
+        agent: str,
+        message: str,
+    ) -> RelayOutcome:
+        """DM/nudge a single agent on the CEO's behalf — or gate it.
+
+        A focused, one-recipient relay: the Secretary carries a CEO message to
+        one named agent (e.g. "be-dev-1, prioritize the auth bug"). It runs
+        through the SAME gate classifier as ``relay_directive`` so a nudge that
+        reads like a gated action (spend, go-public, greenlight, cap breach) is
+        surfaced to the CEO action queue instead of executed silently. In-bounds
+        nudges are delivered as an ack-required ALERT notification from the CEO.
+        """
+        return await self.relay_directive(
+            ceo_agent_id=ceo_agent_id,
+            directive=message,
+            recipients=[agent],
+        )
+
+    async def announce(
+        self,
+        *,
+        ceo_agent_id: UUID,
+        channel: str,
+        message: str,
+    ) -> RelayOutcome:
+        """Post a CEO announcement to a company channel — or gate it.
+
+        Posts to a company-wide channel (``announcements`` / ``all-hands``) as
+        the CEO. Gate-checked like every other downward action: an announcement
+        that reads like a gated action (e.g. "we're going public Friday") is
+        surfaced to the CEO action queue rather than broadcast. In-bounds
+        announcements go out via ``MessagingService.post_to_channel`` (channel
+        write-RBAC is enforced inside it — the CEO may write ``announcements``
+        and ``all-hands``).
+        """
+        goals = await self._goals()
+        policy = OperatingPolicy.model_validate(goals.operating_policy)
+        decision = classify_directive(message, policy.gate_list)
+        if decision.gated:
+            await NotificationService().send_ack_notification(
+                from_agent=ceo_agent_id,
+                to_agent="ceo",
+                body=(
+                    f"[GATED — needs your approval] The announcement "
+                    f'"{message}" would trip the "{decision.gate}" gate, so it '
+                    "was not broadcast. Approve it explicitly to proceed."
+                ),
+            )
+            self.log.info("Secretary announce gated", gate=decision.gate)
+            return RelayOutcome(
+                executed=False,
+                gated=True,
+                gate=decision.gate,
+                recipients=[],
+                detail=(
+                    f"Announcement trips the '{decision.gate}' gate; raised as a "
+                    "CEO action item instead of broadcasting."
+                ),
+            )
+
+        from roboco.services.messaging import get_messaging_service
+
+        messaging = get_messaging_service(self.session)
+        await messaging.post_to_channel(
+            agent_id=ceo_agent_id,
+            channel_slug=channel,
+            content=f"[CEO announcement — via Secretary]\n\n{message}",
+        )
+        self.log.info("Secretary announcement posted", channel=channel)
+        return RelayOutcome(
+            executed=True,
+            gated=False,
+            gate=None,
+            recipients=[channel],
+            detail=f"Announced to #{channel}.",
+        )
+
+    async def surface(self) -> dict:
+        """The CEO's "what needs me right now" view — blockers + unacked signals.
+
+        A focused slice of the action queue for a quick proactive surface: the
+        human-resolvable blockers (stranded work) and the unacked CEO-targeted
+        approval/alert notifications (pitches, escalations). Composed from the
+        same helpers ``action_queue`` uses, so the two never disagree.
+        """
+        stranded = await self._human_blocked_tasks()
+        ceo_notifications = await self._ceo_actionable_notifications()
+        items: list[dict] = [
+            self._task_item(
+                t, kind="stranded_blocker", reason="Blocked on a human decision"
+            )
+            for t in stranded
+        ]
+        items.extend(self._notification_item(n) for n in ceo_notifications)
+        return {
+            "blockers": len(stranded),
+            "unacked_notifications": len(ceo_notifications),
+            "items": items,
+            "generated_at": datetime.now(UTC).isoformat(),
+        }
+
     async def apply_goal_edit(
         self,
         *,
