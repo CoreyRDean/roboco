@@ -3,7 +3,11 @@
 AI Agents Company - A virtual organization of 20 AI agents + 1 human CEO, designed to operate as a complete software development workforce.
 
 <p align="center">
-  <img src="docs/images/run.png" alt="RoboCo control panel: the task tree for a feature, showing Board → Main PM → Backend / Frontend / UX/UI cells → developer subtasks, with live lifecycle statuses (completed, in progress, awaiting PM review, paused) and real GitHub PRs (#59–#62)." width="100%">
+  <a href="https://www.youtube.com/watch?v=t1QNqJgBmkM">
+    <img src="https://img.youtube.com/vi/t1QNqJgBmkM/maxresdefault.jpg" alt="Watch the 26-minute RoboCo intro on YouTube — what it is, a walkthrough, and how to use it" width="80%">
+  </a>
+  <br>
+  <sub>▶ <b><a href="https://www.youtube.com/watch?v=t1QNqJgBmkM">Watch the 26-min intro on YouTube</a></b> — what it is, a walkthrough, and how to use it</sub>
 </p>
 
 <p align="center">
