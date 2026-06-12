@@ -58,16 +58,22 @@ def _translate_service_error(e: ServiceError) -> HTTPException:
 
 
 class StartLiveRequest(BaseModel):
-    """Open a live intake chat scoped to a project XOR a product."""
+    """Open a live Secretary chat.
+
+    Scope is optional: pass at most one of ``project_id`` / ``product_id`` to
+    scope the agent to a checked-out repo (the task-drafting path), or neither to
+    open the Secretary's default scopeless free chat (INTENT.md §3) — it acts
+    through its company-wide read/action tools rather than a cloned repo.
+    """
 
     project_id: UUID | None = None
     product_id: UUID | None = None
     initial_message: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
-    def _exactly_one_scope(self) -> StartLiveRequest:
-        if bool(self.project_id) == bool(self.product_id):
-            raise ValueError("provide exactly one of project_id / product_id")
+    def _at_most_one_scope(self) -> StartLiveRequest:
+        if self.project_id is not None and self.product_id is not None:
+            raise ValueError("provide at most one of project_id / product_id")
         return self
 
 

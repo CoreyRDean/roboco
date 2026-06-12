@@ -390,6 +390,35 @@ def _orchestrator_headers() -> dict[str, str]:
     return headers
 
 
+def _ceo_headers() -> dict[str, str]:
+    """CEO-identity headers for the Secretary's ACTION tools.
+
+    The Secretary is the CEO's human-only interface and acts on the CEO's
+    behalf (INTENT.md §2/§3), so its *action* tools authenticate **as the
+    CEO** — ``X-Agent-ID`` = the CEO UUID, ``X-Agent-Role`` = ``ceo`` — using
+    the CEO-scoped token the orchestrator injected (``ROBOCO_SECRETARY_CEO_*``,
+    signed by the same signer the panel uses). This is distinct from
+    ``_orchestrator_headers`` (the read tools' own prompter identity): the read
+    surfaces accept any authenticated agent, but creating tasks / editing goals /
+    messaging / announcing requires CEO authority.
+
+    Falls back to the container's own identity when the CEO env is absent (e.g.
+    auth disabled in a dev/test run) so the tools still function locally.
+    """
+    headers = {
+        "X-Agent-ID": os.environ.get(
+            "ROBOCO_SECRETARY_CEO_ID", os.environ.get("ROBOCO_AGENT_ID", "intake-1")
+        ),
+        "X-Agent-Role": os.environ.get("ROBOCO_SECRETARY_CEO_ROLE", "ceo"),
+    }
+    token = os.environ.get("ROBOCO_SECRETARY_CEO_TOKEN") or os.environ.get(
+        "ROBOCO_AGENT_TOKEN"
+    )
+    if token:
+        headers["X-Agent-Token"] = token
+    return headers
+
+
 async def _orchestrator_get(path: str) -> dict[str, Any]:
     """GET a read surface from the orchestrator, returning a tool-content dict.
 
@@ -413,6 +442,40 @@ async def _orchestrator_get(path: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": text}]}
 
 
+async def _orchestrator_ceo_write(
+    method: str, path: str, body: dict[str, Any]
+) -> dict[str, Any]:
+    """POST/PUT to an orchestrator surface AS THE CEO, returning a tool dict.
+
+    Backs the Secretary's *action* tools — the ones that act directly on the
+    CEO's word (create a task, edit goals, message an agent, announce). Uses the
+    CEO-identity headers (``_ceo_headers``) so the server authorizes the write
+    as the CEO. Like ``_orchestrator_get`` it never raises: a failed write
+    becomes a readable error the agent can relay to the CEO rather than a
+    stalled turn. The full response body is returned so the agent can confirm
+    exactly what happened (e.g. a gate decision: executed vs. gated).
+    """
+    import httpx
+
+    url = f"{_orchestrator_base_url()}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.request(
+                method, url, headers=_ceo_headers(), json=body
+            )
+            response.raise_for_status()
+            payload = response.json()
+        text = json.dumps(payload, indent=2, default=str)
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text
+        logger.error("Secretary action failed", path=path, error=detail)
+        text = f"{method} {path} failed ({exc.response.status_code}): {detail}"
+    except Exception as exc:
+        logger.error("Secretary action failed", path=path, error=str(exc))
+        text = f"Could not {method} {path}: {exc}"
+    return {"content": [{"type": "text", "text": text}]}
+
+
 # ---------------------------------------------------------------------------
 # SDK adapter — the only SDK-coupled code (lazy import). Verified against
 # claude-agent-sdk; not exercised in the gate (needs the live claude binary).
@@ -422,16 +485,28 @@ async def _orchestrator_get(path: str) -> dict[str, Any]:
 # The intake agent's hard tool allowlist: read-only built-ins + the draft tool.
 _INTAKE_BASE_TOOLS: tuple[str, ...] = ("Read", "Grep", "Glob", "Task")
 
-# The Secretary's MCP tools, by bare name. ``propose_draft`` (kept) + the
-# read-only company-state tools (3.D1) + the goal-edit proposal (3.D2). The
-# ``_gate`` allows exactly these (however the SDK namespaces them) and nothing
-# else; ``allowed_tools`` lists their fully-namespaced forms.
+# The Secretary's MCP tools, by bare name. The ``_gate`` allows exactly these
+# (however the SDK namespaces them) and nothing else; ``allowed_tools`` lists
+# their fully-namespaced forms. Three groups:
+#   - reads (3.D1): read_goals / read_status / read_queue — own (prompter) auth.
+#   - proposals: propose_draft (intake card) + propose_goal_edit (confirm-card
+#     path) — surfaced to the CEO for confirmation, no direct side effect.
+#   - CEO actions: create_task / update_goals / message_agent / announce /
+#     surface — act DIRECTLY on the CEO's word, authenticated AS THE CEO. The
+#     gated guardrail (spend / go_public / new_product_line / cap_breach) is
+#     enforced server-side: a gated action is surfaced to the CEO action queue
+#     instead of executing.
 _SECRETARY_MCP_TOOLS: tuple[str, ...] = (
     "propose_draft",
     "read_goals",
     "read_status",
     "read_queue",
     "propose_goal_edit",
+    "create_task",
+    "update_goals",
+    "message_agent",
+    "announce",
+    "surface",
 )
 
 
@@ -467,6 +542,13 @@ def build_intake_options(
       ``propose_draft`` the driver turns it into a confirmable ``goal_edit`` card,
       and the CEO-authenticated panel applies the patch to the SAME artifact the
       Panel editor writes (``PUT /api/goals``).
+    - ``create_task`` / ``update_goals`` / ``message_agent`` / ``announce`` /
+      ``surface`` — the Secretary's CEO-authority ACTION tools: they act DIRECTLY
+      on the CEO's word (not a confirm-card round-trip). They authenticate as the
+      CEO via ``_ceo_headers`` (the CEO-scoped token the orchestrator injected),
+      and the gated guardrail (spend / go_public / new_product_line / cap_breach)
+      is enforced server-side — a gated action is surfaced to the CEO action
+      queue instead of executing.
 
     Draft / goal-edit emission is deterministic via the MCP tool call → driver
     interception, not a fragile text fence.
@@ -556,6 +638,88 @@ def build_intake_options(
             ]
         }
 
+    @tool(
+        "create_task",
+        "Create a task DIRECTLY (you act with CEO authority). Use this when the "
+        "CEO clearly wants a specific piece of work built and there is no need to "
+        "round-trip a draft card. Pass a JSON 'task' object with: title, "
+        "description (>=20 chars), acceptance_criteria (list), team (backend | "
+        "frontend | ux_ui), task_type (code | documentation | research | planning "
+        "| design | administrative), nature (technical | ...), "
+        "estimated_complexity (low | medium | high | ...), priority (0-3), and "
+        "EXACTLY ONE of project_id (single repo) or product_id (cross-cell "
+        "fan-out). Returns the created task or a readable error. Prefer "
+        "propose_draft when the CEO still wants to review before it enters the "
+        "workflow.",
+        {"task": dict},
+    )
+    async def _create_task(args: dict[str, Any]) -> dict[str, Any]:
+        body = args.get("task", args)
+        # Mark CEO-originated and human-confirmed so the prompter-origin gate in
+        # the route does not reject it (the CEO is the human, acting live).
+        if isinstance(body, dict):
+            body = {**body, "source": "ceo", "confirmed_by_human": True}
+        return await _orchestrator_ceo_write("POST", "/api/tasks", body)
+
+    @tool(
+        "update_goals",
+        "Apply a Business Goals change DIRECTLY (you act with CEO authority), "
+        "landing it in the SAME singleton charter the Panel edits. Use this for a "
+        "direction change the CEO has clearly stated and you don't need a "
+        "confirm-card round-trip. Pass an 'edit' patch with only the fields that "
+        "change: north_star (string), objectives (list), operating_policy "
+        "(object), constraints (list of strings). For a heavier or ambiguous edit "
+        "the CEO may want to eyeball, use propose_goal_edit instead (it surfaces a "
+        "confirmable card). Returns the updated charter.",
+        {"edit": dict},
+    )
+    async def _update_goals(args: dict[str, Any]) -> dict[str, Any]:
+        body = args.get("edit", args)
+        return await _orchestrator_ceo_write("PUT", "/api/goals", body)
+
+    @tool(
+        "message_agent",
+        "DM/nudge a single agent on the CEO's behalf (e.g. 'be-dev-1, prioritize "
+        "the auth bug' or answer an agent's open question). Pass agent (slug, e.g. "
+        "'main-pm', 'be-dev-1') and message (plain language). Gate-checked: if the "
+        "message reads like a gated action (spend, go-public, greenlight, cap "
+        "breach) it is surfaced to the CEO action queue instead of sent — the "
+        "response says whether it was 'executed' or 'gated'.",
+        {"agent": str, "message": str},
+    )
+    async def _message_agent(args: dict[str, Any]) -> dict[str, Any]:
+        body = {"agent": args.get("agent", ""), "message": args.get("message", "")}
+        return await _orchestrator_ceo_write(
+            "POST", "/api/secretary/message-agent", body
+        )
+
+    @tool(
+        "announce",
+        "Post a company-wide announcement as the CEO. Pass channel "
+        "('announcements' for a read-only broadcast, or 'all-hands' for open "
+        "discussion) and message (plain language). Gate-checked like message_agent: "
+        "an announcement that reads like a gated action is surfaced to the CEO "
+        "action queue instead of broadcast.",
+        {"message": str, "channel": str},
+    )
+    async def _announce(args: dict[str, Any]) -> dict[str, Any]:
+        body = {
+            "channel": args.get("channel", "announcements"),
+            "message": args.get("message", ""),
+        }
+        return await _orchestrator_ceo_write("POST", "/api/secretary/announce", body)
+
+    @tool(
+        "surface",
+        "Surface what needs the CEO right now: human-resolvable blockers (stranded "
+        "work) and unacked CEO-targeted signals (pitches, escalations). A focused "
+        "slice of the action queue for a quick proactive check-in. Takes no "
+        "arguments.",
+        {},
+    )
+    async def _surface(_args: dict[str, Any]) -> dict[str, Any]:
+        return await _orchestrator_get("/api/secretary/surface")
+
     server = create_sdk_mcp_server(
         name="intake",
         version="1.0.0",
@@ -565,6 +729,11 @@ def build_intake_options(
             _read_status,
             _read_queue,
             _propose_goal_edit,
+            _create_task,
+            _update_goals,
+            _message_agent,
+            _announce,
+            _surface,
         ],
     )
 
@@ -597,10 +766,11 @@ def build_intake_options(
         return PermissionResultDeny(
             message=(
                 f"{tool_name} is not available to the Secretary agent. Your tools "
-                "are Read, Grep, Glob, Task; read_goals / read_status / read_queue "
-                "to see the company; propose_draft to draft a task; and "
-                "propose_goal_edit to propose a goals change. Ask the human inline; "
-                "use propose_draft / propose_goal_edit to surface a confirmable card."
+                "are Read, Grep, Glob, Task; read_goals / read_status / read_queue / "
+                "surface to see the company; create_task / update_goals / "
+                "message_agent / announce to act on the CEO's word; propose_draft / "
+                "propose_goal_edit to surface a confirmable card. Ask the human "
+                "inline by writing a normal chat message."
             )
         )
 

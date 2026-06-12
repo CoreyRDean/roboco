@@ -41,6 +41,29 @@ class RelayResponse(BaseModel):
     detail: str = Field(..., description="Human-readable explanation of the outcome")
 
 
+class MessageAgentRequest(BaseModel):
+    """A CEO message/nudge to a single named agent."""
+
+    agent: str = Field(
+        ..., min_length=1, description="Agent slug to message (e.g. 'be-dev-1')"
+    )
+    message: str = Field(
+        ..., min_length=1, description="The CEO's message, in plain language"
+    )
+
+
+class AnnounceRequest(BaseModel):
+    """A CEO announcement to a company-wide channel."""
+
+    channel: str = Field(
+        default="announcements",
+        description="Channel slug — 'announcements' or 'all-hands'",
+    )
+    message: str = Field(
+        ..., min_length=1, description="The announcement body, in plain language"
+    )
+
+
 class GoalEditRequest(BaseModel):
     """A confirmed goal edit — patch semantics, all fields optional.
 

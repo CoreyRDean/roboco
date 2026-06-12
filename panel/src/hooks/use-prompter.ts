@@ -14,16 +14,22 @@ import {
   type ConfirmPayload,
 } from "@/lib/api/prompter";
 import { getErrorMessage } from "@/lib/api/client";
+import { goalsApi } from "@/lib/api/goals";
 import { Team } from "@/types";
-import type { TaskType, TaskNature, Complexity } from "@/types";
+import type {
+  TaskType,
+  TaskNature,
+  Complexity,
+  BusinessGoalsUpdate,
+} from "@/types";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export type PrompterState =
-  | "form" // collecting scope + opening message (no chat yet)
-  | "preparing" // agent spawning / cloning the repo(s)
+  | "idle" // free chat, no session yet — the Secretary's default entry
+  | "preparing" // agent spawning (lazy, on the first message)
   | "chatting"
   | "streaming" // a reply is mid-flight over SSE
   | "draft_preview"
@@ -39,6 +45,8 @@ export interface ChatMessage {
   content: string;
   /** Present only on an assistant message that contains a draft proposal */
   draft?: DraftProposal;
+  /** Present only on an assistant message that contains a goal-edit proposal */
+  goalEdit?: BusinessGoalsUpdate;
 }
 
 /** Which target the human picked for this chat. */
@@ -142,6 +150,22 @@ function draftFromEvent(data: Record<string, unknown> | undefined): {
   return { draft: d as unknown as DraftProposal, scale };
 }
 
+/** Pull a goal-edit patch out of a `goal_edit` SSE event's data payload.
+ *  The patch carries only the changed Business Goals fields; an empty object
+ *  isn't a usable edit (mirrors the backend's `_coerce_goal_edit` guard). */
+function goalEditFromEvent(
+  data: Record<string, unknown> | undefined
+): BusinessGoalsUpdate | null {
+  if (!data || typeof data !== "object") return null;
+  const d = data as Record<string, unknown>;
+  const hasField =
+    d.north_star != null ||
+    d.objectives != null ||
+    d.operating_policy != null ||
+    d.constraints != null;
+  return hasField ? (d as unknown as BusinessGoalsUpdate) : null;
+}
+
 // ---------------------------------------------------------------------------
 // Refresh durability
 //
@@ -204,7 +228,7 @@ function clearPersisted(): void {
 // ---------------------------------------------------------------------------
 
 export function usePrompter() {
-  const [state, setState] = useState<PrompterState>("form");
+  const [state, setState] = useState<PrompterState>("idle");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
@@ -215,11 +239,10 @@ export function usePrompter() {
   const [createdTaskTitle, setCreatedTaskTitle] = useState<string | null>(null);
   const [createdTaskTeam, setCreatedTaskTeam] = useState<Team | null>(null);
 
-  // The up-front scope form.
+  // Optional in-chat scope for the task-drafting path. Empty = scopeless chat.
   const [targetKind, setTargetKind] = useState<TargetKind>("project");
   const [projectId, setProjectId] = useState("");
   const [productId, setProductId] = useState("");
-  const [initialMessage, setInitialMessage] = useState("");
 
   const [editableDraft, setEditableDraft] = useState<EditableDraft>(EMPTY_DRAFT);
 
@@ -279,6 +302,19 @@ export function usePrompter() {
     });
   }, []);
 
+  /** Attach the agent's proposed goal-edit patch to the current/last assistant
+   *  message (same placement logic as `attachDraft`), so the confirm-card lands
+   *  inline at the bottom of the conversation. */
+  const attachGoalEdit = useCallback((goalEdit: BusinessGoalsUpdate) => {
+    setMessages((prev) => {
+      const id = streamingIdRef.current;
+      if (id) {
+        return prev.map((m) => (m.id === id ? { ...m, goalEdit } : m));
+      }
+      return [...prev, { id: newId(), role: "assistant", content: "", goalEdit }];
+    });
+  }, []);
+
   // -----------------------------------------------------------------------
   // SSE handling
   // -----------------------------------------------------------------------
@@ -320,6 +356,14 @@ export function usePrompter() {
           }
           break;
         }
+        case "goal_edit": {
+          // A confirmable goal-edit card — rendered inline; the CEO applies the
+          // patch on confirm (PUT /goals). The conversation stays open (unlike a
+          // draft, which gates into a preview), so don't change `state`.
+          const patch = goalEditFromEvent(evt.data);
+          if (patch) attachGoalEdit(patch);
+          break;
+        }
         case "error":
           streamingIdRef.current = null;
           setActivity(null);
@@ -335,7 +379,7 @@ export function usePrompter() {
           break;
       }
     },
-    [appendDelta, attachDraft, addMessage]
+    [appendDelta, attachDraft, attachGoalEdit, addMessage]
   );
 
   const closeStream = useCallback(() => {
@@ -439,58 +483,74 @@ export function usePrompter() {
   }, [openStream]);
 
   // -----------------------------------------------------------------------
-  // Start the live session (from the scope form)
+  // Lazy session start
+  //
+  // The Secretary opens STRAIGHT into a free chat (no scope form), so the live
+  // session is spawned lazily on the first message. Scope (project/product) is
+  // optional: when the CEO has picked one via the in-chat affordance the session
+  // spawns scoped (clones that repo, enabling a task draft); otherwise it spawns
+  // scopeless and acts through its company-wide read/action tools.
   // -----------------------------------------------------------------------
 
-  const isFormValid = useCallback((): boolean => {
-    const scoped = targetKind === "product" ? productId !== "" : projectId !== "";
-    return scoped && initialMessage.trim().length > 0;
-  }, [targetKind, projectId, productId, initialMessage]);
-
-  const start = useCallback(async () => {
-    if (!isFormValid() || state === "preparing") return;
-    const opening = initialMessage.trim();
-    setState("preparing");
-    addMessage({ role: "user", content: opening });
-    try {
-      const { session_id } = await prompterLiveApi.start({
-        ...(targetKind === "product"
-          ? { product_id: productId }
-          : { project_id: projectId }),
-        initial_message: opening,
-      });
-      sessionIdRef.current = session_id;
-      setSessionId(session_id);
-      openStream(session_id);
-      setIsSending(true); // the opening reply is on its way over SSE
-      // start now returns immediately; the container spawns in the background
-      // (clone + image build can take a minute). Show that until the first event.
-      setActivity("Preparing the agent — cloning your repo and reading the code…");
-      setState("streaming");
-    } catch (err) {
-      addMessage({ role: "error", content: getErrorMessage(err) });
-      setState("form");
-    }
-  }, [
-    isFormValid,
-    state,
-    initialMessage,
-    targetKind,
-    productId,
-    projectId,
-    addMessage,
-    openStream,
-  ]);
+  /** Spawn the live session with the current scope (if any). The opening message
+   *  is delivered server-side. Returns true on success. */
+  const startSession = useCallback(
+    async (opening: string): Promise<boolean> => {
+      const scope = scopeRef.current;
+      const scoped =
+        scope.targetKind === "product"
+          ? scope.productId
+            ? { product_id: scope.productId }
+            : {}
+          : scope.projectId
+            ? { project_id: scope.projectId }
+            : {};
+      const isScoped = "product_id" in scoped || "project_id" in scoped;
+      setState("preparing");
+      try {
+        const { session_id } = await prompterLiveApi.start({
+          ...scoped,
+          initial_message: opening,
+        });
+        sessionIdRef.current = session_id;
+        setSessionId(session_id);
+        openStream(session_id);
+        setIsSending(true); // the opening reply is on its way over SSE
+        // start returns immediately; the container spawns in the background
+        // (a scoped chat also clones + reads the repo, which can take a minute).
+        setActivity(
+          isScoped
+            ? "Preparing the agent — cloning your repo and reading the code…"
+            : "Connecting to your company…"
+        );
+        setState("streaming");
+        return true;
+      } catch (err) {
+        addMessage({ role: "error", content: getErrorMessage(err) });
+        setState("idle");
+        return false;
+      }
+    },
+    [addMessage, openStream]
+  );
 
   // -----------------------------------------------------------------------
-  // Send a chat message
+  // Send a chat message — lazily starting the session on the first one.
   // -----------------------------------------------------------------------
 
   const send = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
+      if (!trimmed || isSending || state === "preparing") return;
+
       const sid = sessionIdRef.current;
-      if (!trimmed || isSending || !sid) return;
+      // First message of the chat: spawn the session and let `startSession`
+      // deliver this as the opening message (echo it locally for immediacy).
+      if (!sid) {
+        addMessage({ role: "user", content: trimmed });
+        await startSession(trimmed);
+        return;
+      }
 
       setIsSending(true);
       setState("streaming");
@@ -504,7 +564,7 @@ export function usePrompter() {
         setState("chatting");
       }
     },
-    [isSending, addMessage]
+    [isSending, state, addMessage, startSession]
   );
 
   // -----------------------------------------------------------------------
@@ -608,6 +668,50 @@ export function usePrompter() {
   }, [editableDraft, isValidForLaunch, closeStream]);
 
   // -----------------------------------------------------------------------
+  // Goal-edit confirm — apply the proposed patch as the CEO (PUT /goals).
+  //
+  // Mirrors the draft path's "human confirms the card" seam: the Secretary
+  // container only PROPOSES the edit (it has no goal-write authority); the CEO
+  // confirms it here and the panel applies the patch to the same singleton
+  // Business Goals artifact the Panel editor writes.
+  // -----------------------------------------------------------------------
+
+  const [confirmingGoalEditId, setConfirmingGoalEditId] = useState<string | null>(
+    null
+  );
+
+  const confirmGoalEdit = useCallback(
+    async (messageId: string, patch: BusinessGoalsUpdate) => {
+      setConfirmingGoalEditId(messageId);
+      try {
+        await goalsApi.update(patch);
+        // Mark the card applied so it renders as confirmed (and can't re-fire).
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId ? { ...m, goalEdit: undefined } : m
+          )
+        );
+        addMessage({
+          role: "assistant",
+          content: "Done — I updated the Business Goals.",
+        });
+        toast.success("Business Goals updated.");
+      } catch (err) {
+        toast.error(`Couldn't update goals: ${getErrorMessage(err)}`);
+      } finally {
+        setConfirmingGoalEditId(null);
+      }
+    },
+    [addMessage]
+  );
+
+  const dismissGoalEdit = useCallback((messageId: string) => {
+    setMessages((prev) =>
+      prev.map((m) => (m.id === messageId ? { ...m, goalEdit: undefined } : m))
+    );
+  }, []);
+
+  // -----------------------------------------------------------------------
   // Reset to start another conversation
   // -----------------------------------------------------------------------
 
@@ -624,12 +728,11 @@ export function usePrompter() {
     setEditableDraft(EMPTY_DRAFT);
     setProjectId("");
     setProductId("");
-    setInitialMessage("");
     setTargetKind("project");
     setCreatedTaskId(null);
     setCreatedTaskTitle(null);
     setCreatedTaskTeam(null);
-    setState("form");
+    setState("idle");
   }, [closeStream]);
 
   return {
@@ -644,17 +747,13 @@ export function usePrompter() {
     createdTaskTitle,
     createdTaskTeam,
 
-    // Scope form
+    // Optional in-chat scope affordance (task-drafting). Empty = scopeless chat.
     targetKind,
     setTargetKind,
     projectId,
     setProjectId,
     productId,
     setProductId,
-    initialMessage,
-    setInitialMessage,
-    isFormValid,
-    start,
 
     // Chat + confirm
     send,
@@ -664,6 +763,9 @@ export function usePrompter() {
     updateDraft,
     isValidForLaunch,
     launchTask,
+    confirmGoalEdit,
+    dismissGoalEdit,
+    confirmingGoalEditId,
     startAnother,
     isLaunching,
   };

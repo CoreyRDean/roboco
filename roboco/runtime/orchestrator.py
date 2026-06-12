@@ -2650,12 +2650,14 @@ class AgentOrchestrator:
         panel showed). The panel opens the SSE stream right away; the agent's
         first reply arrives once the container is up. A spawn failure is pushed
         onto the relay as an ``error`` event and closes the session, so the panel
-        shows it instead of hanging. Exactly one of ``project_slug`` /
-        ``product_id`` must be given.
+        shows it instead of hanging. At most one of ``project_slug`` /
+        ``product_id`` may be given; **neither** opens a scopeless free chat (the
+        Secretary's default entry — INTENT.md §3), which clones nothing and acts
+        through its company-wide read/action tools.
         """
-        if bool(project_slug) == bool(product_id):
+        if project_slug and product_id:
             raise ValueError(
-                "intake scope requires exactly one of project_slug / product_id"
+                "intake scope accepts at most one of project_slug / product_id"
             )
         self._open_intake_relay(session_id)
         self._schedule_bg(
@@ -2679,12 +2681,13 @@ class AgentOrchestrator:
 
         Opens the relay then clones + launches the container, awaiting the whole
         thing. Prefer ``start_intake_session`` on the request path; this blocking
-        variant is for direct/internal callers and tests. Exactly one of
-        ``project_slug`` / ``product_id`` must be given.
+        variant is for direct/internal callers and tests. At most one of
+        ``project_slug`` / ``product_id`` may be given; neither opens a scopeless
+        free chat (no clone).
         """
-        if bool(project_slug) == bool(product_id):
+        if project_slug and product_id:
             raise ValueError(
-                "intake scope requires exactly one of project_slug / product_id"
+                "intake scope accepts at most one of project_slug / product_id"
             )
         self._open_intake_relay(session_id)
         return await self._spawn_intake_container(
@@ -2838,9 +2841,17 @@ class AgentOrchestrator:
         the primary is stable). The agent's cwd is the primary project's intake
         workspace; for a product the sibling repos sit alongside it under
         ``/data/workspaces`` and are readable via Grep/Glob/Read.
+
+        **Scopeless** (neither given) → the Secretary's default free chat: clone
+        nothing, cwd at the workspaces root. The Secretary acts through its
+        company-wide read/action tools, not a checked-out repo; a scoped task
+        draft is an optional in-chat affordance the panel can start later.
         """
         from roboco.db.base import get_session_factory
         from roboco.services.workspace import WorkspaceService
+
+        if not project_slug and not product_id:
+            return "/data/workspaces", []
 
         team = get_agent_team(INTAKE_AGENT_ID) or "board"
         factory = get_session_factory()
@@ -2910,7 +2921,25 @@ class AgentOrchestrator:
         No claude CLI args (the image ENTRYPOINT is the SDK driver), no
         settings.json/hook mount (the driver owns port 9000), no MCP config.
         The driver reads ``/app/system-prompt.md`` and the env below.
+
+        SECURITY — CEO-scoped authority: the Secretary is the CEO's *human-only*
+        conversational interface (INTENT.md §2/§3). It talks to exactly one
+        person — the human CEO — and acts on the CEO's word. Its action tools
+        (create_task, update_goals, message_agent, announce, surface) must
+        therefore authenticate **as the CEO**, not as the low-privilege
+        ``prompter`` identity. We mint a CEO-scoped HMAC token (the same signer
+        the panel uses to act as the CEO — ``issue_panel_token``) and inject it
+        plus the CEO identity headers' source values. This is safe precisely
+        because the Secretary container is never exposed to any non-CEO actor:
+        only the CEO chats with it, and its gated guardrail (spend / go_public /
+        new_product_line / cap_breach) is enforced server-side in
+        SecretaryService — a gated directive is surfaced to the CEO action queue
+        rather than executed, even with the CEO token in hand.
         """
+        from roboco.agents_config import issue_panel_token
+        from roboco.seeds.initial_data import CEO_AGENT_ID
+
+        ceo_token = issue_panel_token()
         cmd: list[str] = [
             "docker",
             "run",
@@ -2939,6 +2968,17 @@ class AgentOrchestrator:
                 f"ROBOCO_PROMPTER_SESSION_ID={spec.session_id}",
                 "-e",
                 f"ROBOCO_WORKSPACE={spec.cwd}",
+                # CEO-scoped credentials for the Secretary's ACTION tools. The
+                # read tools keep using the container's own (prompter) identity;
+                # the action tools (create_task / update_goals / message_agent /
+                # announce / surface) send these CEO headers + token so they act
+                # with CEO authority. See the SECURITY note above.
+                "-e",
+                f"ROBOCO_SECRETARY_CEO_ID={CEO_AGENT_ID}",
+                "-e",
+                "ROBOCO_SECRETARY_CEO_ROLE=ceo",
+                "-e",
+                f"ROBOCO_SECRETARY_CEO_TOKEN={ceo_token}",
                 "-e",
                 f"CLAUDE_CODE_SUBAGENT_MODEL={spec.cli_model}",
             ]
