@@ -17,6 +17,7 @@ fakes.
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
@@ -46,9 +47,11 @@ class StreamChunk:
 
     ``kind`` is the panel-facing event type; the rest is payload. Decoupled
     from the SDK's message classes so the relay/panel never import the SDK.
+    Kinds: text, thinking, tool_use, tool_result, turn_end, system, draft,
+    goal_edit, error.
     """
 
-    kind: str  # text|thinking|tool_use|tool_result|turn_end|system|draft|error
+    kind: str
     text: str = ""
     tool: str = ""
     data: dict[str, Any] = field(default_factory=dict)
@@ -97,30 +100,89 @@ def _is_propose_draft(name: str) -> bool:
     return name == "propose_draft" or name.endswith("__propose_draft")
 
 
-def _block_to_chunk(
-    block: Any,
-) -> tuple[StreamChunk | None, str | None, dict[str, Any] | None]:
-    """Classify one assistant content block → (chunk, text_part, draft).
+def _is_propose_goal_edit(name: str) -> bool:
+    """True for the ``propose_goal_edit`` tool, however the SDK namespaces it.
 
-    A ``propose_draft`` tool call yields a draft; thinking / other tool_use
-    yield a chunk; a TextBlock yields a text_part (already streamed live, mined
-    for a fenced draft by the caller). Unknown blocks yield nothing.
+    The Secretary's goal-editing seam mirrors ``propose_draft``: the agent calls
+    the tool, the driver intercepts it and surfaces a confirmable ``goal_edit``
+    chunk. The actual CEO-authenticated ``PUT /api/goals`` happens when the human
+    confirms the card in the panel (the container has no CEO authority), so the
+    change lands in the SAME Business Goals artifact the panel editor writes.
+    """
+    return name == "propose_goal_edit" or name.endswith("__propose_goal_edit")
+
+
+def _coerce_goal_edit(data: Any) -> dict[str, Any] | None:
+    """Return ``data`` as a goal-edit patch dict, else ``None``.
+
+    Accepts a dict or a JSON string. A valid patch carries at least one of the
+    editable Business Goals fields (``north_star``, ``objectives``,
+    ``operating_policy``, ``constraints``) — an empty object is not a usable
+    edit and is dropped, mirroring the ``propose_draft`` "needs a title" guard.
+    """
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(data, dict):
+        return None
+    fields = ("north_star", "objectives", "operating_policy", "constraints")
+    if any(data.get(f) is not None for f in fields):
+        return data
+    return None
+
+
+def _goal_edit_from_tool_input(tool_input: Any) -> dict[str, Any] | None:
+    """Pull the goal-edit patch out of a ``propose_goal_edit`` tool call's input.
+
+    Tolerant of both shapes: the patch nested under an ``edit`` key, or the patch
+    fields passed flat as the input itself (mirrors ``_draft_from_tool_input``).
+    """
+    if not isinstance(tool_input, dict):
+        return None
+    return _coerce_goal_edit(tool_input.get("edit", tool_input))
+
+
+@dataclass
+class _BlockParts:
+    """What one assistant content block decomposes into for ``_blocks_to_chunks``.
+
+    A block contributes at most one of these: a normalized ``chunk`` (thinking /
+    tool_use), a ``text_part`` (already streamed live; mined for a fenced draft),
+    a ``draft`` (``propose_draft``), or a ``goal_edit`` patch
+    (``propose_goal_edit``). Unset fields stay ``None``.
+    """
+
+    chunk: StreamChunk | None = None
+    text_part: str | None = None
+    draft: dict[str, Any] | None = None
+    goal_edit: dict[str, Any] | None = None
+
+
+def _block_to_chunk(block: Any) -> _BlockParts:
+    """Classify one assistant content block into its contribution.
+
+    ``propose_draft`` yields a draft; ``propose_goal_edit`` yields a goal-edit
+    patch; thinking / other tool_use yield a chunk; a TextBlock yields a
+    text_part (already streamed live, mined for a fenced draft by the caller).
+    Unknown blocks yield an empty result.
     """
     if hasattr(block, "thinking"):  # ThinkingBlock
-        return StreamChunk(kind="thinking", text=str(block.thinking)), None, None
+        return _BlockParts(chunk=StreamChunk(kind="thinking", text=str(block.thinking)))
     if hasattr(block, "name") and hasattr(block, "input"):  # ToolUseBlock
         name = str(block.name)
         tool_input = getattr(block, "input", {})
         if _is_propose_draft(name):
-            return None, None, _draft_from_tool_input(tool_input)
-        return (
-            StreamChunk(kind="tool_use", tool=name, data={"input": tool_input}),
-            None,
-            None,
+            return _BlockParts(draft=_draft_from_tool_input(tool_input))
+        if _is_propose_goal_edit(name):
+            return _BlockParts(goal_edit=_goal_edit_from_tool_input(tool_input))
+        return _BlockParts(
+            chunk=StreamChunk(kind="tool_use", tool=name, data={"input": tool_input})
         )
     if hasattr(block, "text"):  # TextBlock — already streamed; mine for a draft
-        return None, str(block.text), None
-    return None, None, None
+        return _BlockParts(text_part=str(block.text))
+    return _BlockParts()
 
 
 def _blocks_to_chunks(content: list[Any]) -> list[StreamChunk]:
@@ -135,20 +197,28 @@ def _blocks_to_chunks(content: list[Any]) -> list[StreamChunk]:
     the agent types the spec instead of calling the tool) the complete text is
     also mined for a fenced ``roboco-draft`` block. thinking + other tool_use
     (which do NOT arrive as deltas) are emitted as before.
+
+    The Secretary's **``propose_goal_edit``** tool is handled the same way: it
+    becomes a single ``goal_edit`` chunk the panel renders as a confirmable card
+    (the CEO confirms it, and the panel applies the patch as the CEO).
     """
     chunks: list[StreamChunk] = []
     text_parts: list[str] = []
     draft: dict[str, Any] | None = None
+    goal_edit: dict[str, Any] | None = None
     for block in content or []:
-        chunk, text_part, block_draft = _block_to_chunk(block)
-        if chunk is not None:
-            chunks.append(chunk)
-        if text_part is not None:
-            text_parts.append(text_part)
-        draft = draft or block_draft
+        parts = _block_to_chunk(block)
+        if parts.chunk is not None:
+            chunks.append(parts.chunk)
+        if parts.text_part is not None:
+            text_parts.append(parts.text_part)
+        draft = draft or parts.draft
+        goal_edit = goal_edit or parts.goal_edit
     draft = draft or _extract_draft("".join(text_parts))
     if draft is not None:
         chunks.append(StreamChunk(kind="draft", data=draft))
+    if goal_edit is not None:
+        chunks.append(StreamChunk(kind="goal_edit", data=goal_edit))
     return chunks
 
 
@@ -271,6 +341,8 @@ class IntakeDriver:
                 elif chunk.kind == "draft":
                     drafted = True
                     self.log.info("Intake draft emitted")
+                elif chunk.kind == "goal_edit":
+                    self.log.info("Secretary goal-edit proposed")
                 await self._emit(chunk)
         except Exception as exc:
             self.log.error("Intake turn failed", error=str(exc), chunks=chunks)
@@ -282,6 +354,66 @@ class IntakeDriver:
 
 
 # ---------------------------------------------------------------------------
+# Orchestrator HTTP bridge — how the Secretary's read tools see the company.
+# Mirrors roboco/mcp/flow_server.py's bridge: env-driven base URL + the
+# container's own agent-identity headers. SDK-free and unit-testable.
+# ---------------------------------------------------------------------------
+
+
+def _orchestrator_base_url() -> str:
+    """Base URL of the orchestrator API (defaults to the docker-network host).
+
+    ``ROBOCO_API_URL`` is the same env the intake container already carries
+    (set by the orchestrator's intake spawn); fall back to the service DNS name
+    so a bare ``docker run`` still reaches it.
+    """
+    return os.environ.get("ROBOCO_API_URL", "http://roboco-orchestrator:8000")
+
+
+def _orchestrator_headers() -> dict[str, str]:
+    """Agent-identity headers for the read tools (the flow_server pattern).
+
+    The Secretary reads company state on the CEO's behalf, but it authenticates
+    as its OWN identity (``intake-1`` / ``prompter``) — the read endpoints
+    (``GET /api/goals``, ``/api/secretary/status|queue``) accept any
+    authenticated agent. ``X-Agent-Token`` is forwarded when present so the calls
+    keep working under ``ROBOCO_AGENT_AUTH_REQUIRED`` (the orchestrator only
+    issues a token into the container env in that mode).
+    """
+    headers = {
+        "X-Agent-ID": os.environ.get("ROBOCO_AGENT_ID", "intake-1"),
+        "X-Agent-Role": os.environ.get("ROBOCO_AGENT_ROLE", "prompter"),
+    }
+    token = os.environ.get("ROBOCO_AGENT_TOKEN")
+    if token:
+        headers["X-Agent-Token"] = token
+    return headers
+
+
+async def _orchestrator_get(path: str) -> dict[str, Any]:
+    """GET a read surface from the orchestrator, returning a tool-content dict.
+
+    Returns the standard MCP tool result shape (a ``content`` list with one text
+    block of the JSON body, or a readable error) so a read tool can ``return``
+    it directly. Never raises — a failed read becomes an error message the agent
+    can relay to the CEO rather than a stalled turn.
+    """
+    import httpx
+
+    url = f"{_orchestrator_base_url()}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, headers=_orchestrator_headers())
+            response.raise_for_status()
+            payload = response.json()
+        text = json.dumps(payload, indent=2, default=str)
+    except Exception as exc:
+        logger.error("Secretary read failed", path=path, error=str(exc))
+        text = f"Could not read {path}: {exc}"
+    return {"content": [{"type": "text", "text": text}]}
+
+
+# ---------------------------------------------------------------------------
 # SDK adapter — the only SDK-coupled code (lazy import). Verified against
 # claude-agent-sdk; not exercised in the gate (needs the live claude binary).
 # ---------------------------------------------------------------------------
@@ -290,6 +422,23 @@ class IntakeDriver:
 # The intake agent's hard tool allowlist: read-only built-ins + the draft tool.
 _INTAKE_BASE_TOOLS: tuple[str, ...] = ("Read", "Grep", "Glob", "Task")
 
+# The Secretary's MCP tools, by bare name. ``propose_draft`` (kept) + the
+# read-only company-state tools (3.D1) + the goal-edit proposal (3.D2). The
+# ``_gate`` allows exactly these (however the SDK namespaces them) and nothing
+# else; ``allowed_tools`` lists their fully-namespaced forms.
+_SECRETARY_MCP_TOOLS: tuple[str, ...] = (
+    "propose_draft",
+    "read_goals",
+    "read_status",
+    "read_queue",
+    "propose_goal_edit",
+)
+
+
+def _is_secretary_mcp_tool(name: str) -> bool:
+    """True for any Secretary MCP tool, however the SDK namespaces the name."""
+    return any(name == t or name.endswith(f"__{t}") for t in _SECRETARY_MCP_TOOLS)
+
 
 def build_intake_options(
     *,
@@ -297,18 +446,30 @@ def build_intake_options(
     cwd: str,
     model: str | None = None,
 ) -> Any:  # pragma: no cover - thin SDK construction
-    """Build locked-down ``ClaudeAgentOptions`` for the intake session.
+    """Build locked-down ``ClaudeAgentOptions`` for the Secretary session.
 
-    Isolation/security: the intake agent must NOT inherit the host's personal
+    Isolation/security: the Secretary agent must NOT inherit the host's personal
     Claude Code env (Gmail/Notion MCP, Write/Edit/Bash). So:
 
     - ``strict_mcp_config=True`` + ``setting_sources=[]`` → ignore the host's
       ``~/.claude.json`` / ``settings.json``; use ONLY the MCP server below.
     - ``permission_mode="dontAsk"`` (NOT ``bypassPermissions``) + a ``can_use_tool``
-      gate → a hard allowlist (Read/Grep/Glob/Task + ``propose_draft``), no prompts.
+      gate → a hard allowlist (Read/Grep/Glob/Task + the Secretary MCP tools),
+      no prompts.
 
-    Draft emission: the agent calls the ``propose_draft`` MCP tool, which the
-    driver turns into a ``draft`` event — deterministic, not a fragile text fence.
+    Secretary MCP tools (``_SECRETARY_MCP_TOOLS``):
+
+    - ``propose_draft`` — KEPT: emit a task-draft card (the original intake job).
+    - ``read_goals`` / ``read_status`` / ``read_queue`` — read-only company state
+      so the Secretary can brief the CEO (3.D1); each GETs an orchestrator read
+      surface via the HTTP bridge above and returns the JSON to the agent.
+    - ``propose_goal_edit`` — propose a Business Goals change (3.D2); like
+      ``propose_draft`` the driver turns it into a confirmable ``goal_edit`` card,
+      and the CEO-authenticated panel applies the patch to the SAME artifact the
+      Panel editor writes (``PUT /api/goals``).
+
+    Draft / goal-edit emission is deterministic via the MCP tool call → driver
+    interception, not a fragile text fence.
 
     NOTE: ``setting_sources=[]`` must be validated against the mounted-``~/.claude``
     auth on the next smoke; if auth breaks, narrow it instead of removing it.
@@ -339,12 +500,76 @@ def build_intake_options(
             ]
         }
 
+    @tool(
+        "read_goals",
+        "Read the live Business Goals charter (north star, objectives, operating "
+        "policy, constraints). Call this to ground a status brief or before "
+        "proposing a goal edit, so you know the current state. Takes no arguments.",
+        {},
+    )
+    async def _read_goals(_args: dict[str, Any]) -> dict[str, Any]:
+        return await _orchestrator_get("/api/goals")
+
+    @tool(
+        "read_status",
+        "Read a compact company status: in-flight work by state, active blockers, "
+        "recent activity, and spend vs. budget. Use it to answer 'how are we "
+        "doing?' and to brief the CEO. Takes no arguments.",
+        {},
+    )
+    async def _read_status(_args: dict[str, Any]) -> dict[str, Any]:
+        return await _orchestrator_get("/api/secretary/status")
+
+    @tool(
+        "read_queue",
+        "Read the CEO action queue: tasks awaiting CEO approval, board reviews "
+        "ready to approve & start, stranded/blocked work needing a human call, and "
+        "unacked CEO notifications (pitches, escalations). Walk the CEO through "
+        "these one at a time. Takes no arguments.",
+        {},
+    )
+    async def _read_queue(_args: dict[str, Any]) -> dict[str, Any]:
+        return await _orchestrator_get("/api/secretary/queue")
+
+    @tool(
+        "propose_goal_edit",
+        "Propose a change to the Business Goals charter for the CEO to confirm. "
+        "Call this once the CEO has agreed to set or update direction. Pass a JSON "
+        "patch with only the fields that change: north_star (string), objectives "
+        "(list), operating_policy (object), constraints (list of strings). The CEO "
+        "confirms the card and the change lands in the same artifact the Panel "
+        "edits — you do not write it yourself.",
+        {"edit": dict},
+    )
+    async def _propose_goal_edit(_args: dict[str, Any]) -> dict[str, Any]:
+        # Mirrors propose_draft: the driver intercepts this call and emits the
+        # goal_edit card; this handler only acknowledges. The CEO-authenticated
+        # panel applies the patch via PUT /api/goals on confirm.
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "Goal edit submitted — the CEO can review and confirm it."
+                    ),
+                }
+            ]
+        }
+
     server = create_sdk_mcp_server(
-        name="intake", version="1.0.0", tools=[_propose_draft]
+        name="intake",
+        version="1.0.0",
+        tools=[
+            _propose_draft,
+            _read_goals,
+            _read_status,
+            _read_queue,
+            _propose_goal_edit,
+        ],
     )
 
     async def _gate(tool_name: str, _input: dict[str, Any], _ctx: Any) -> Any:
-        if tool_name in _INTAKE_BASE_TOOLS or _is_propose_draft(tool_name):
+        if tool_name in _INTAKE_BASE_TOOLS or _is_secretary_mcp_tool(tool_name):
             return PermissionResultAllow()
         # The intake's job is to ask questions, so it reaches for AskUserQuestion
         # by reflex. It isn't wired to the live chat panel (and isn't allowed), so
@@ -371,9 +596,11 @@ def build_intake_options(
         # built-ins (Write, ToolSearch, …). Tell it what it actually has.
         return PermissionResultDeny(
             message=(
-                f"{tool_name} is not available to the intake agent. Your only tools "
-                "are Read, Grep, Glob, Task, and propose_draft. Ask the human inline; "
-                "when the spec is ready, call propose_draft."
+                f"{tool_name} is not available to the Secretary agent. Your tools "
+                "are Read, Grep, Glob, Task; read_goals / read_status / read_queue "
+                "to see the company; propose_draft to draft a task; and "
+                "propose_goal_edit to propose a goals change. Ask the human inline; "
+                "use propose_draft / propose_goal_edit to surface a confirmable card."
             )
         )
 
@@ -381,7 +608,10 @@ def build_intake_options(
         system_prompt=system_prompt,
         cwd=cwd,
         mcp_servers={"intake": server},
-        allowed_tools=[*_INTAKE_BASE_TOOLS, "mcp__intake__propose_draft"],
+        allowed_tools=[
+            *_INTAKE_BASE_TOOLS,
+            *(f"mcp__intake__{t}" for t in _SECRETARY_MCP_TOOLS),
+        ],
         model=model,
         include_partial_messages=True,  # live token streaming
         permission_mode="dontAsk",

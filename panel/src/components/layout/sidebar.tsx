@@ -21,7 +21,7 @@ import {
   GitBranch,
   Database,
   Cpu,
-  Sparkles,
+  Headset,
   Target,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -36,7 +36,7 @@ const navItems = [
   // Work Management
   { title: "Tasks", href: "/tasks", icon: ListTodo },
   { title: "Kanban", href: "/kanban", icon: Kanban },
-  { title: "Task Assistant", href: "/prompter", icon: Sparkles },
+  { title: "Secretary", href: "/secretary", icon: Headset },
 
   // Development
   { title: "Projects", href: "/projects", icon: FolderGit2 },
