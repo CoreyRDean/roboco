@@ -29,6 +29,7 @@ from roboco.services.gateway.claim_guards import (
 from roboco.services.gateway.envelope import Envelope
 from roboco.services.gateway.evidence_builder import (
     BriefingInputs,
+    build_company_goals,
     build_context_briefing,
     build_evidence_for_task,
     build_task_handoff,
@@ -230,6 +231,11 @@ class ChoreographerDeps:
     # Optional so existing callsites that don't exercise the rate-limit path
     # don't have to plumb it in.
     stream_bus: Any = None
+    # BusinessGoalsService — the singleton company charter injected into every
+    # agent briefing (INTENT.md §9). Optional so callsites / tests that don't
+    # exercise goal injection don't have to plumb it in; when None the briefing
+    # simply omits company_goals.
+    business_goals: Any = None
 
 
 @dataclass(frozen=True)
@@ -378,6 +384,10 @@ class Choreographer:
     @property
     def stream_bus(self) -> Any:
         return self._deps.stream_bus
+
+    @property
+    def business_goals(self) -> Any:
+        return self._deps.business_goals
 
     async def _touch(self, task_id: UUID | None) -> None:
         """Best-effort heartbeat write; silent on missing task."""
@@ -728,8 +738,21 @@ class Choreographer:
             recent_team_activity=await repo.recent_team_activity(agent_id),
             blockers_in_my_lane=await repo.blockers_in_lane(agent_id),
             task_handoff=task_handoff,
+            company_goals=await self._company_goals(),
         )
         return build_context_briefing(inputs)
+
+    async def _company_goals(self) -> dict[str, Any] | None:
+        """Fetch the singleton Business Goals charter as a compact briefing payload.
+
+        Returns ``None`` when the goals service is not wired in (e.g. unit tests
+        that don't plumb it), so every agent that DOES have it orients its work
+        to the company's north star, objectives, and the operating-policy leash.
+        """
+        if self._deps.business_goals is None:
+            return None
+        goals = await self._deps.business_goals.get_or_initialize()
+        return build_company_goals(goals)
 
     async def _run_claim_guards(
         self,

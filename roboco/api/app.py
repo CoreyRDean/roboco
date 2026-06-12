@@ -16,6 +16,7 @@ from roboco.api.middleware import setup_middleware
 from roboco.api.routes.a2a import router as a2a_router
 from roboco.api.routes.a2a import wellknown_router as a2a_wellknown_router
 from roboco.api.routes.agents import router as agents_router
+from roboco.api.routes.business_goals import router as business_goals_router
 from roboco.api.routes.channels import router as channels_router
 from roboco.api.routes.dashboard import router as dashboard_router
 from roboco.api.routes.docs import router as docs_router
@@ -306,6 +307,13 @@ def create_app() -> FastAPI:
         product_router,
         prefix=f"{api_prefix}/products",
         tags=["Products"],
+    )
+
+    # Business Goals (the CEO-editable company charter — INTENT.md §9)
+    app.include_router(
+        business_goals_router,
+        prefix=f"{api_prefix}/goals",
+        tags=["Business Goals"],
     )
 
     # AI Providers (model routing + Ollama-cloud fallback)

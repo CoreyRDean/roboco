@@ -554,6 +554,48 @@ class ProductProjectTable(Base):
 
 
 # =============================================================================
+# BUSINESS GOALS TABLE
+# =============================================================================
+
+
+class BusinessGoalsTable(Base):
+    """The single CEO-editable company charter (INTENT.md §9).
+
+    Singleton: exactly one row, keyed on the fixed
+    ``00000000-0000-0000-0000-000000000001`` id and seeded by the migration.
+    JSON columns hold the structured sub-models (objectives, operating_policy,
+    constraints); north_star is free text. Injected into every agent briefing.
+    """
+
+    __tablename__ = "business_goals"
+
+    # Fixed singleton primary key — one charter for the whole company.
+    id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+
+    # Direction
+    north_star: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    constraints: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+
+    # Objectives (prioritized list of dicts)
+    objectives: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
+
+    # Operating policy (the leash) — a single nested dict
+    operating_policy: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), onupdate=lambda: datetime.now(UTC), nullable=True
+    )
+
+
+# =============================================================================
 # WORK SESSION TABLE
 # =============================================================================
 
