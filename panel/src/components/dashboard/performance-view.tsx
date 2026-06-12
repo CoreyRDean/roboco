@@ -48,27 +48,29 @@ function ProxyBadge() {
   );
 }
 
-/** Spend vs budget — a horizontal gauge that turns red when the projection
- *  exceeds the cap. */
+/** Spend vs budget — headlines ACTUAL spend (30d) against the cap; the projected
+ *  run-rate is a secondary forecast (amber when it would exceed the cap), never
+ *  shown as money already spent. */
 function SpendCard({
   monthlyBudget,
   spend30d,
   projectedMonthly,
-  pctOfBudget,
   overBudget,
 }: {
   monthlyBudget: number;
   spend30d: number;
   projectedMonthly: number;
-  pctOfBudget: number | null;
+  // True when the *projection* would exceed the cap — a forecast caution, not a
+  // breach of actual spend.
   overBudget: boolean;
 }) {
-  const pct = pctOfBudget ?? 0;
-  const chartData = [{ name: "Projected", value: projectedMonthly, budget: monthlyBudget }];
-  const barColor = overBudget ? "var(--destructive)" : "var(--chart-2)";
+  const actualPct = monthlyBudget > 0 ? (spend30d / monthlyBudget) * 100 : 0;
+  const actualOver = spend30d > monthlyBudget;
+  const chartData = [{ name: "Spend", value: spend30d, budget: monthlyBudget }];
+  const barColor = actualOver ? "var(--destructive)" : "var(--chart-2)";
 
   return (
-    <Card className={overBudget ? "border-destructive/50" : undefined}>
+    <Card className={actualOver ? "border-destructive/50" : undefined}>
       <CardHeader className="pb-2">
         <div className="flex items-center justify-between">
           <CardTitle className="text-base flex items-center gap-2">
@@ -77,16 +79,16 @@ function SpendCard({
           </CardTitle>
           <ProxyBadge />
         </div>
-        <CardDescription>Projected monthly cost against the cap</CardDescription>
+        <CardDescription>Actual spend (30d) against the cap</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex items-baseline justify-between">
           <span
             className={
-              "text-2xl font-bold " + (overBudget ? "text-destructive" : "")
+              "text-2xl font-bold " + (actualOver ? "text-destructive" : "")
             }
           >
-            {fmtCost(projectedMonthly)}
+            {fmtCost(spend30d)}
           </span>
           <span className="text-sm text-muted-foreground">
             of {fmtCost(monthlyBudget)} cap
@@ -101,12 +103,12 @@ function SpendCard({
             <CartesianGrid horizontal={false} strokeDasharray="3 3" className="opacity-20" />
             <XAxis
               type="number"
-              domain={[0, Math.max(monthlyBudget, projectedMonthly)]}
+              domain={[0, Math.max(monthlyBudget, spend30d)]}
               hide
             />
             <YAxis type="category" dataKey="name" hide />
             <Tooltip
-              formatter={(value) => [fmtCost(typeof value === "number" ? value : 0), "Projected"]}
+              formatter={(value) => [fmtCost(typeof value === "number" ? value : 0), "Spent (30d)"]}
               contentStyle={{ fontSize: 12 }}
             />
             <Bar dataKey="value" radius={[3, 3, 3, 3]} barSize={18}>
@@ -117,16 +119,17 @@ function SpendCard({
         <div className="flex items-center justify-between text-xs text-muted-foreground">
           <span className="flex items-center gap-1">
             <Activity className="h-3 w-3" />
-            {fmtCost(spend30d)} actual (30d)
+            {actualPct.toFixed(0)}% of budget used
           </span>
-          {pctOfBudget != null && (
-            <Badge
-              variant={overBudget ? "destructive" : "secondary"}
-              className="text-xs"
-            >
-              {pct.toFixed(0)}% of budget
-            </Badge>
-          )}
+          <span
+            className={
+              "flex items-center gap-1 " +
+              (overBudget ? "text-amber-600 dark:text-amber-500" : "")
+            }
+            title="Projected monthly cost at the current usage rate"
+          >
+            ~{fmtCost(projectedMonthly)}/mo projected
+          </span>
         </div>
       </CardContent>
     </Card>
@@ -297,7 +300,6 @@ export function PerformanceView() {
         monthlyBudget={spend.monthly_budget_usd}
         spend30d={spend.spend_30d_usd}
         projectedMonthly={spend.projected_monthly_usd}
-        pctOfBudget={spend.projected_pct_of_budget ?? null}
         overBudget={spend.over_budget}
       />
       <ProductsCard
