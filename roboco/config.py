@@ -186,6 +186,50 @@ class Settings(BaseSettings):
     )
 
     # ==========================================================================
+    # Web & Market Research (Phase 2)
+    # ==========================================================================
+    # External research is read-only on the world (INTENT.md §6 — autonomous,
+    # no CEO gate). The provider is pluggable: when none is configured the
+    # ResearchService degrades gracefully (it returns a structured "no provider"
+    # result rather than raising), so the company never hard-fails for lack of a
+    # search key. Breadth is cost-bounded by the caps below.
+    search_provider: str | None = Field(
+        default=None,
+        description=(
+            "External search provider id (e.g. 'tavily', 'brave'). When unset, "
+            "research degrades gracefully — search/fetch return a structured "
+            "'no search provider configured' result instead of raising."
+        ),
+    )
+    search_api_key: str | None = Field(
+        default=None,
+        description="API key for the configured search provider.",
+    )
+    search_base_url: str | None = Field(
+        default=None,
+        description=(
+            "Override base URL for the search provider (defaults to the "
+            "provider's canonical endpoint). Useful for self-hosted proxies."
+        ),
+    )
+    search_top_k_max: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Hard cap on results returned per web_search (cost bound).",
+    )
+    search_fetch_max_bytes: int = Field(
+        default=500_000,
+        ge=1_000,
+        description="Hard cap on bytes read per web_fetch (cost bound).",
+    )
+    search_timeout_seconds: float = Field(
+        default=20.0,
+        ge=1.0,
+        description="Per-request timeout for search/fetch HTTP calls.",
+    )
+
+    # ==========================================================================
     # Security
     # ==========================================================================
     encryption_key: str = Field(
