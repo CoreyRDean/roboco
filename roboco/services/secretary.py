@@ -659,7 +659,28 @@ class SecretaryService(BaseService):
             .order_by(NotificationTable.timestamp.desc())
             .limit(50)
         )
-        return list(result.scalars().all())
+        notifs = list(result.scalars().all())
+        # Drop notifications whose related task is already terminal
+        # (cancelled/completed) so e.g. a cancelled pitch stops lingering in the
+        # CEO queue as an actionable signal.
+        task_ids = {n.related_task_id for n in notifs if n.related_task_id}
+        if task_ids:
+            terminal = set(
+                (
+                    await self.session.execute(
+                        select(TaskTable.id).where(
+                            TaskTable.id.in_(task_ids),
+                            TaskTable.status.in_(
+                                [TaskStatus.COMPLETED, TaskStatus.CANCELLED]
+                            ),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            notifs = [n for n in notifs if n.related_task_id not in terminal]
+        return notifs
 
     async def _ceo_agent_id(self) -> UUID | None:
         from roboco.db.tables import AgentTable

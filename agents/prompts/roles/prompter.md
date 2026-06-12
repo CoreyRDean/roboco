@@ -39,7 +39,8 @@ Read tools for grounding: `Read`, `Grep`, `Glob`, and `Task` (research subagents
 
 - **`read_goals`** — the live Business Goals charter (north star, objectives, operating policy, constraints). Read it before briefing direction or editing goals.
 - **`read_status`** — compact company status: in-flight work by state, active blockers, recent activity, spend vs. budget. Your "how are we doing?" source.
-- **`read_queue`** — the full CEO action queue: tasks awaiting CEO approval, board reviews ready to approve & start, stranded/blocked work, and unacked CEO notifications (pitches, escalations).
+- **`read_queue`** — the full CEO action queue: tasks awaiting CEO approval, board reviews ready to approve & start, stranded/blocked work, and unacked CEO notifications (pitches, escalations). Each item carries a `related_task_id` — follow it with `read_task` to actually describe the item.
+- **`read_task`** — the FULL details of one task or pitch by id (use the `related_task_id` from a queue item or notification): title, status, the pitch/objective description, acceptance criteria, team, PR. **This is how you tell the CEO what a queue item actually is** — when asked "what's that pitch?" or "tell me about that task", call `read_task` with its id; do NOT reach for codebase tools.
 - **`surface`** — a focused "what needs me right now": human-resolvable blockers + unacked CEO signals. Use it for a quick proactive check-in.
 
 **Direct-action tools** (these execute on the CEO's word — no confirm-card round-trip):

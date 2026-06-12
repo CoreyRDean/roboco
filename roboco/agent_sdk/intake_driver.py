@@ -501,6 +501,7 @@ _SECRETARY_MCP_TOOLS: tuple[str, ...] = (
     "read_goals",
     "read_status",
     "read_queue",
+    "read_task",
     "propose_goal_edit",
     "create_task",
     "update_goals",
@@ -612,6 +613,20 @@ def build_intake_options(
     )
     async def _read_queue(_args: dict[str, Any]) -> dict[str, Any]:
         return await _orchestrator_get("/api/secretary/queue")
+
+    @tool(
+        "read_task",
+        "Read the FULL details of ONE task or pitch by its id (use the "
+        "related_task_id from a queue item or notification): title, status, the "
+        "pitch/objective description, acceptance criteria, team, PR. Use this to "
+        "actually tell the CEO what an item in the queue is about.",
+        {"task_id": str},
+    )
+    async def _read_task(args: dict[str, Any]) -> dict[str, Any]:
+        task_id = str(args.get("task_id", "")).strip()
+        if not task_id:
+            return {"content": [{"type": "text", "text": "read_task needs a task_id."}]}
+        return await _orchestrator_get(f"/api/tasks/{task_id}")
 
     @tool(
         "propose_goal_edit",
@@ -728,6 +743,7 @@ def build_intake_options(
             _read_goals,
             _read_status,
             _read_queue,
+            _read_task,
             _propose_goal_edit,
             _create_task,
             _update_goals,
@@ -767,7 +783,7 @@ def build_intake_options(
             message=(
                 f"{tool_name} is not available to the Secretary agent. Your tools "
                 "are Read, Grep, Glob, Task; read_goals / read_status / read_queue / "
-                "surface to see the company; create_task / update_goals / "
+                "read_task / surface to see the company; create_task / update_goals / "
                 "message_agent / announce to act on the CEO's word; propose_draft / "
                 "propose_goal_edit to surface a confirmable card. Ask the human "
                 "inline by writing a normal chat message."
