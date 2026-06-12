@@ -36,6 +36,7 @@ as the source of truth for verb signatures.
 | `notify_list` | `notify_list(unread_only: bool = True, pending_ack_only: bool = False, limit: int = 20)` |
 | `notify_get` | `notify_get(notification_id: UUID)` |
 | `notify_ack` | `notify_ack(notification_id: UUID)` |
+| `read_messages` | `read_messages()` |
 | `channels` | `channels()` |
 
 ## qa
@@ -64,6 +65,7 @@ as the source of truth for verb signatures.
 | `notify_list` | `notify_list(unread_only: bool = True, pending_ack_only: bool = False, limit: int = 20)` |
 | `notify_get` | `notify_get(notification_id: UUID)` |
 | `notify_ack` | `notify_ack(notification_id: UUID)` |
+| `read_messages` | `read_messages()` |
 | `channels` | `channels()` |
 
 ## documenter
@@ -94,6 +96,7 @@ as the source of truth for verb signatures.
 | `notify_list` | `notify_list(unread_only: bool = True, pending_ack_only: bool = False, limit: int = 20)` |
 | `notify_get` | `notify_get(notification_id: UUID)` |
 | `notify_ack` | `notify_ack(notification_id: UUID)` |
+| `read_messages` | `read_messages()` |
 | `channels` | `channels()` |
 
 ## cell_pm
@@ -130,7 +133,15 @@ as the source of truth for verb signatures.
 | `notify_list` | `notify_list(unread_only: bool = True, pending_ack_only: bool = False, limit: int = 20)` |
 | `notify_get` | `notify_get(notification_id: UUID)` |
 | `notify_ack` | `notify_ack(notification_id: UUID)` |
+| `read_messages` | `read_messages()` |
 | `channels` | `channels()` |
+
+### Search tools (external web research)
+
+| Tool | Body schema |
+|------|-------------|
+| `web_search` | `web_search(query: str, top_k: int = 5)` |
+| `web_fetch` | `web_fetch(url: str)` |
 
 ## main_pm
 
@@ -166,7 +177,15 @@ as the source of truth for verb signatures.
 | `notify_list` | `notify_list(unread_only: bool = True, pending_ack_only: bool = False, limit: int = 20)` |
 | `notify_get` | `notify_get(notification_id: UUID)` |
 | `notify_ack` | `notify_ack(notification_id: UUID)` |
+| `read_messages` | `read_messages()` |
 | `channels` | `channels()` |
+
+### Search tools (external web research)
+
+| Tool | Body schema |
+|------|-------------|
+| `web_search` | `web_search(query: str, top_k: int = 5)` |
+| `web_fetch` | `web_fetch(url: str)` |
 
 ## product_owner
 
@@ -191,7 +210,15 @@ as the source of truth for verb signatures.
 | `notify_list` | `notify_list(unread_only: bool = True, pending_ack_only: bool = False, limit: int = 20)` |
 | `notify_get` | `notify_get(notification_id: UUID)` |
 | `notify_ack` | `notify_ack(notification_id: UUID)` |
+| `read_messages` | `read_messages()` |
 | `channels` | `channels()` |
+
+### Search tools (external web research)
+
+| Tool | Body schema |
+|------|-------------|
+| `web_search` | `web_search(query: str, top_k: int = 5)` |
+| `web_fetch` | `web_fetch(url: str)` |
 
 ## head_marketing
 
@@ -216,7 +243,15 @@ as the source of truth for verb signatures.
 | `notify_list` | `notify_list(unread_only: bool = True, pending_ack_only: bool = False, limit: int = 20)` |
 | `notify_get` | `notify_get(notification_id: UUID)` |
 | `notify_ack` | `notify_ack(notification_id: UUID)` |
+| `read_messages` | `read_messages()` |
 | `channels` | `channels()` |
+
+### Search tools (external web research)
+
+| Tool | Body schema |
+|------|-------------|
+| `web_search` | `web_search(query: str, top_k: int = 5)` |
+| `web_fetch` | `web_fetch(url: str)` |
 
 ## auditor
 
@@ -236,4 +271,19 @@ as the source of truth for verb signatures.
 | `notify_list` | `notify_list(unread_only: bool = True, pending_ack_only: bool = False, limit: int = 20)` |
 | `notify_get` | `notify_get(notification_id: UUID)` |
 | `channels` | `channels()` |
+
+## prompter
+
+### Flow verbs
+
+| Verb | Body schema |
+|------|-------------|
+| `i_am_idle` | `i_am_idle()` |
+
+### Content (do) tools
+
+| Tool | Body schema |
+|------|-------------|
+| `note` | `note(text: str, scope: str = 'note', task_id: UUID | None = None, title: str | None = None, context: str = '', options: list[str | str] | None = None, chosen: str = '', rationale: str = '', consequences: list[str] | None = None, what_done: str = '', what_learned: str = '', what_struggled: str = '', next_steps: list[str] | None = None)` |
+| `evidence` | `evidence(task_id: UUID)` |
 

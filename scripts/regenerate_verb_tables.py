@@ -16,6 +16,7 @@ The script reads from:
     - ``roboco.services.gateway.role_config.ROLE_CONFIGS`` for role -> verb list
     - ``roboco.api.schemas.v1.flow`` for flow verb body schemas
     - ``roboco.api.schemas.v1.do`` for content tool body schemas
+    - ``roboco.api.schemas.v1.research`` for external-research (search) schemas
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from typing import Any, get_args, get_origin
 from pydantic import BaseModel
 from roboco.api.schemas.v1 import do as do_schemas
 from roboco.api.schemas.v1 import flow as flow_schemas
+from roboco.api.schemas.v1 import research as research_schemas
 from roboco.services.gateway.role_config import ROLE_CONFIGS
 
 _OUT_DIR = Path(__file__).resolve().parents[1] / "agents/prompts/_generated"
@@ -82,6 +84,23 @@ def _do_schemas() -> dict[str, type[BaseModel]]:
     """Schemas from do.py keyed by content-tool name."""
     out: dict[str, type[BaseModel]] = {}
     for name, obj in inspect.getmembers(do_schemas, inspect.isclass):
+        if not issubclass(obj, BaseModel) or obj is BaseModel:
+            continue
+        if not name.endswith("Request"):
+            continue
+        verb_camel = name[: -len("Request")]
+        verb = _camel_to_snake(verb_camel)
+        out.setdefault(verb, obj)
+    return out
+
+
+def _search_schemas() -> dict[str, type[BaseModel]]:
+    """Schemas from research.py keyed by search-tool name.
+
+    ``WebSearchRequest`` -> ``web_search``, ``WebFetchRequest`` -> ``web_fetch``.
+    """
+    out: dict[str, type[BaseModel]] = {}
+    for name, obj in inspect.getmembers(research_schemas, inspect.isclass):
         if not issubclass(obj, BaseModel) or obj is BaseModel:
             continue
         if not name.endswith("Request"):
@@ -163,6 +182,23 @@ def _render_role_section(role: str) -> str:
         sig = _signature_for_schema(schema) if schema is not None else "(see do_server)"
         lines.append(f"| `{tool}` | `{tool}{sig}` |")
     lines.append("")
+    # Search tools (roboco-search) — only roles with external-research access
+    # carry these; the section is omitted entirely for the rest.
+    if cfg.search_tools:
+        search_schemas_map = _search_schemas()
+        lines.append("### Search tools (external web research)")
+        lines.append("")
+        lines.append("| Tool | Body schema |")
+        lines.append("|------|-------------|")
+        for tool in cfg.search_tools:
+            schema = search_schemas_map.get(tool)
+            sig = (
+                _signature_for_schema(schema)
+                if schema is not None
+                else "(see search_server)"
+            )
+            lines.append(f"| `{tool}` | `{tool}{sig}` |")
+        lines.append("")
     return "\n".join(lines)
 
 

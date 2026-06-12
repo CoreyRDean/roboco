@@ -36,6 +36,8 @@ from roboco.services.notification_delivery import NotificationDeliveryService
 from roboco.services.permissions import AgentContext, PermissionService
 from roboco.services.product import ProductService
 from roboco.services.repositories import resolve_agent_identity, resolve_agent_uuid
+from roboco.services.research import ResearchService
+from roboco.services.research import get_research_service as _build_research_service
 from roboco.services.task import TaskService
 from roboco.services.work_session import WorkSessionService
 from roboco.services.workspace import WorkspaceService
@@ -530,6 +532,16 @@ async def get_choreographer(
             business_goals=BusinessGoalsService(db_session),
         )
     )
+
+
+def get_research_service() -> ResearchService:
+    """Build a ``ResearchService`` for the research endpoints.
+
+    The research verbs are stateless (no DB), so no session is threaded in —
+    the provider is resolved from settings at construction. Cheap to build per
+    request; no singleton needed.
+    """
+    return _build_research_service()
 
 
 async def get_content_actions(

@@ -906,6 +906,10 @@ class AgentOrchestrator:
             "mcp__roboco-do__*",
             "mcp__roboco-optimal__*",
             "mcp__roboco-git-readonly__*",
+            # roboco-search is mounted only for research-capable roles (Board +
+            # main/cell PM) and gated server-side; a blanket allow is safe and
+            # keeps the research tools off the interactive-prompt path.
+            "mcp__roboco-search__*",
             "Read(*)",  # All agents can read any file
         ]
 
@@ -1938,6 +1942,7 @@ class AgentOrchestrator:
         - roboco-git-readonly status, log, diff, branch list
         - roboco-optimal      knowledge base, RAG, semantic search
         - roboco-docs         documentation file management (panel docs)
+        - roboco-search       external web research (Board + PMs only)
 
         The agent's role is asserted by the orchestrator API on every
         verb/tool call, so all roles get the same MCP surface from this
@@ -2039,6 +2044,26 @@ class AgentOrchestrator:
                     "roboco.mcp.docs_server",
                     agent_id,
                 ],
+                "env": mcp_env,
+            }
+
+        # Search server — external web research (spec 02-web-research).
+        # Registered only for roles allowed to research; the server reads the
+        # manifest's ``search_tools`` and registers nothing for a role without
+        # them, and the research endpoints are gated by ``require_research``
+        # server-side, so this is fail-closed either way. Mirrors the docs
+        # server's conditional registration. Must match the research-capable
+        # roles in role_config (_RESEARCH_TOOLS) and the require_research guard.
+        research_roles = (
+            "product_owner",
+            "head_marketing",
+            "main_pm",
+            "cell_pm",
+        )
+        if agent_role in research_roles:
+            mcp_servers["roboco-search"] = {
+                "command": "uv",
+                "args": ["run", "python", "-m", "roboco.mcp.search_server"],
                 "env": mcp_env,
             }
 

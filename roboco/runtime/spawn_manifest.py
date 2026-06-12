@@ -43,6 +43,7 @@ class SpawnManifest:
     workspace_path: str
     flow_tools: list[str]
     do_tools: list[str]
+    search_tools: list[str]
     read_tools: list[str]
     write_tools: list[str]
     bash_allowed: bool
@@ -64,6 +65,7 @@ def build_for_role(inputs: SpawnInputs) -> SpawnManifest:
         workspace_path=str(inputs.workspace_path),
         flow_tools=list(cfg.flow_tools),
         do_tools=list(cfg.do_tools),
+        search_tools=list(cfg.search_tools),
         read_tools=list(_READ_TOOLS),
         write_tools=list(_WRITE_TOOLS) if cfg.allows_write else [],
         bash_allowed=True,  # always; bash-guard hook still applies server-side

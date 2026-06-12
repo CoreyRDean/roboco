@@ -29,4 +29,5 @@
 | `notify_list` | `notify_list(unread_only: bool = True, pending_ack_only: bool = False, limit: int = 20)` |
 | `notify_get` | `notify_get(notification_id: UUID)` |
 | `notify_ack` | `notify_ack(notification_id: UUID)` |
+| `read_messages` | `read_messages()` |
 | `channels` | `channels()` |

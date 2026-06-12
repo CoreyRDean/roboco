@@ -26,6 +26,7 @@ class RoleConfig:
     role: str
     flow_tools: tuple[str, ...]  # roboco-flow verbs
     do_tools: tuple[str, ...]  # roboco-do content tools
+    search_tools: tuple[str, ...]  # roboco-search external-research tools
     allows_write: bool  # Edit, Write to workspace
     allows_subagent: bool  # `Agent` tool (parallel research)
     description: str
@@ -38,6 +39,16 @@ _NOTIFY_RECEIVER = ("notify_list", "notify_get", "notify_ack", "read_messages")
 # Wave 2 — channel discovery. Every role gets `channels()` so the LLM stops
 # inventing slugs ("backend-dev", "backend") that don't exist.
 _CHANNEL_DISCOVERY = ("channels",)
+
+# roboco-search tools (spec 02-web-research). Granted only to roles allowed to
+# do external research — the Board names and defends markets, the PMs aim
+# research at the goals. Mirrors the `require_research` guard on the research
+# endpoints (roboco/api/routes/v1/_role_dep.py): Board + main/cell PM. Devs /
+# QA / docs / auditor / prompter work off the codebase, not the world, so they
+# get no search tools (empty tuple) and the roboco-search server registers
+# nothing for them.
+_RESEARCH_TOOLS = ("web_search", "web_fetch")
+_NO_SEARCH: tuple[str, ...] = ()
 
 _DEV_FLOW = spec.intents_for_role(spec.Role.DEVELOPER)
 _DEV_DO = (
@@ -129,6 +140,7 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
         role="developer",
         flow_tools=_DEV_FLOW,
         do_tools=_DEV_DO,
+        search_tools=_NO_SEARCH,
         allows_write=True,
         allows_subagent=False,
         description="Implements features and fixes; commits + pushes; never merges.",
@@ -137,6 +149,7 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
         role="qa",
         flow_tools=_QA_FLOW,
         do_tools=_QA_DO,
+        search_tools=_NO_SEARCH,
         allows_write=False,
         allows_subagent=False,
         description="Reviews code via PR diff and structured evidence; pass or fail.",
@@ -145,6 +158,7 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
         role="documenter",
         flow_tools=_DOC_FLOW,
         do_tools=_DOC_DO,
+        search_tools=_NO_SEARCH,
         allows_write=True,
         allows_subagent=False,
         description="Writes documentation for completed work; commits doc files.",
@@ -153,6 +167,7 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
         role="cell_pm",
         flow_tools=_CELL_PM_FLOW,
         do_tools=_CELL_PM_DO,
+        search_tools=_RESEARCH_TOOLS,
         allows_write=False,
         allows_subagent=True,
         description="Triages, unblocks, and completes cell tasks; merges leaf PRs.",
@@ -161,6 +176,7 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
         role="main_pm",
         flow_tools=_MAIN_PM_FLOW,
         do_tools=_MAIN_PM_DO,
+        search_tools=_RESEARCH_TOOLS,
         allows_write=False,
         allows_subagent=True,
         description="Coordinates across cells; opens master PR; escalates to CEO.",
@@ -169,6 +185,7 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
         role="product_owner",
         flow_tools=_PRODUCT_OWNER_FLOW,
         do_tools=_BOARD_DO,
+        search_tools=_RESEARCH_TOOLS,
         allows_write=False,
         allows_subagent=True,
         description="Product oversight; escalates strategic decisions to CEO.",
@@ -177,6 +194,7 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
         role="head_marketing",
         flow_tools=_HEAD_MARKETING_FLOW,
         do_tools=_BOARD_DO,
+        search_tools=_RESEARCH_TOOLS,
         allows_write=False,
         allows_subagent=True,
         description="Marketing oversight; escalates to CEO.",
@@ -185,6 +203,7 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
         role="auditor",
         flow_tools=_AUDITOR_FLOW,
         do_tools=_AUDITOR_DO,
+        search_tools=_NO_SEARCH,
         allows_write=False,
         allows_subagent=False,
         description="Silent observer; reads but never communicates outwardly.",
@@ -193,6 +212,7 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
         role="prompter",
         flow_tools=_PROMPTER_FLOW,
         do_tools=_PROMPTER_DO,
+        search_tools=_NO_SEARCH,
         allows_write=False,
         allows_subagent=True,
         description=(

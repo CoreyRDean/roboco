@@ -44,6 +44,19 @@ require_cell_pm = _require_roles(frozenset({Role.CELL_PM}))
 require_main_pm = _require_roles(frozenset({Role.MAIN_PM}))
 require_board = _require_roles(frozenset({Role.PRODUCT_OWNER, Role.HEAD_MARKETING}))
 require_auditor = _require_roles(frozenset({Role.AUDITOR}))
+# Roles allowed to do external research (spec 02-web-research): the Board names
+# and defends markets, and the PMs aim research at the goals. Devs/QA/docs work
+# off the codebase, not the world, so they are intentionally excluded.
+require_research = _require_roles(
+    frozenset(
+        {
+            Role.PRODUCT_OWNER,
+            Role.HEAD_MARKETING,
+            Role.MAIN_PM,
+            Role.CELL_PM,
+        }
+    )
+)
 
 
 def envelope_to_response(env: Envelope, request: Request) -> dict[str, Any]:
