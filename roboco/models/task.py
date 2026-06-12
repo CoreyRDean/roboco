@@ -8,6 +8,7 @@ PLAN → EXECUTE → VERIFY → NOTES → CLOSE.
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import Field, model_validator
@@ -422,3 +423,40 @@ class TaskCreateRequest:
     # Prompter origin tracking
     source: str = "manual"
     confirmed_by_human: bool = False
+
+
+@dataclass
+class PitchCreateRequest:
+    """Request data for creating a Board PITCH root task (Phase 4).
+
+    A pitch is a *proposal* for a new product the company originated — it
+    precedes provisioning, so unlike :class:`TaskCreateRequest` it carries
+    **no** ``project_id`` / ``product_id``: the repo does not exist yet. On CEO
+    approval the provisioning path (Track A/E) creates the private repo(s),
+    registers the project/product, and seeds delivery, then reads the structured
+    ``pitch`` payload off ``proactive_context`` to drive that fan-out.
+
+    The structured content contract (``objective``, ``what_this_builds``,
+    ``the_work``, ``notes``, ``rationale``) mirrors the intake
+    :class:`roboco.api.schemas.prompter.PrompterDraftTask` shape. The backend
+    composes a human-readable ``description`` from it deterministically (via
+    ``roboco.services.prompter.compose_description``) so the CEO reads prose in
+    the Approve & Start queue; ``acceptance_criteria`` renders as the pitch's
+    success criteria; the same structured fields are persisted verbatim under
+    ``proactive_context['pitch']`` so provisioning has machine-readable access.
+    """
+
+    # Required — the proposal's identity + author.
+    title: str
+    description: str  # composed from the structured fields before persistence
+    acceptance_criteria: list[str]  # the pitch's success criteria
+    created_by: UUID
+
+    # Structured content contract (the "metadata" carried on the task).
+    objective: str | None = None  # the goal/objective this product serves
+    what_this_builds: list[str] = field(default_factory=list)
+    the_work: list[dict[str, Any]] = field(default_factory=list)  # per-cell slices
+    notes: list[str] = field(default_factory=list)
+    rationale: str | None = None  # why now — grounded in research
+
+    priority: int = 2

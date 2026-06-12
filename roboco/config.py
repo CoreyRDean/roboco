@@ -238,6 +238,32 @@ class Settings(BaseSettings):
     )
 
     # ==========================================================================
+    # Provisioning (Phase 4 — Pitch → Approve → Provision)
+    # ==========================================================================
+    # The org that new private repos are created under, and the PAT used to
+    # create them. INTENT.md §7: provisioning targets a dedicated, private
+    # GitHub org. The org from BusinessGoals.operating_policy.provisioning.
+    # github_org takes priority; this config value is the fallback when the
+    # charter leaves it unset. The token is org-scoped (a brand-new repo has no
+    # project row yet, so the per-project PAT can't apply) and is read directly
+    # here rather than encrypted-at-rest like project tokens, because it is a
+    # single operator-supplied deployment secret, not user-managed in the UI.
+    github_provisioning_org: str = Field(
+        default="",
+        description=(
+            "Fallback GitHub org for repo provisioning when the Business "
+            "Goals charter leaves provisioning.github_org unset."
+        ),
+    )
+    github_provisioning_token: str = Field(
+        default="",
+        description=(
+            "GitHub PAT used to create private repos in the provisioning org "
+            "(POST /orgs/{org}/repos). Org-scoped operator secret."
+        ),
+    )
+
+    # ==========================================================================
     # Workspaces (Multi-Agent Git)
     # ==========================================================================
     workspaces_root: str = Field(

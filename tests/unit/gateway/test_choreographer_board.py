@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import pytest
 from roboco.services.gateway.choreographer import Choreographer, ChoreographerDeps
+from roboco.services.gateway.choreographer.board import PitchInputs
 
 
 def _make_deps(**overrides: Any) -> ChoreographerDeps:
@@ -303,3 +304,84 @@ async def test_board_triage_works_for_head_marketing() -> None:
     env = await c.board_triage(hm_id)
     body = env.as_dict()
     assert body["task_id"] == str(strategic.id)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — pitch (product origination → CEO Approve & Start queue)
+# ---------------------------------------------------------------------------
+
+
+def _pitch_inputs() -> PitchInputs:
+    return PitchInputs(
+        title="Solo Dev Workbench",
+        objective="Give solo AI developers one calm workbench, serving the v1 goal.",
+        what_this_builds=["A web app", "A CLI"],
+        the_work=[
+            {"team": "backend", "summary": "API + storage", "items": ["endpoints"]},
+            {"team": "frontend", "summary": "the workbench UI", "items": ["panels"]},
+        ],
+        success_criteria=["A solo dev ships a project end to end in under an hour"],
+        rationale="Research shows solo AI devs juggle five disconnected tools.",
+        notes=["Reuse the existing auth module"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_pitch_creates_queue_ready_root_for_product_owner() -> None:
+    po_id = uuid4()
+    new_task = MagicMock(id=uuid4(), status="pending")
+    task_svc = AsyncMock()
+    task_svc.agent_for.return_value = MagicMock(role="product_owner", team="board")
+    task_svc.create_pitch.return_value = new_task
+    deps = _make_deps(task=task_svc)
+    c = Choreographer(deps)
+
+    env = await c.pitch(po_id, _pitch_inputs())
+
+    body = env.as_dict()
+    assert env.error is None
+    assert body["task_id"] == str(new_task.id)
+    assert body["status"] == "pending"
+    task_svc.create_pitch.assert_awaited_once()
+    # The request carries the structured contract; no project/product targeting.
+    req = task_svc.create_pitch.call_args.args[0]
+    assert req.title == "Solo Dev Workbench"
+    assert req.acceptance_criteria == [
+        "A solo dev ships a project end to end in under an hour"
+    ]
+    assert req.rationale.startswith("Research shows")
+    # The composed description renders the structured sections for the CEO.
+    assert "## Objective" in req.description
+    assert "## The Work" in req.description
+
+
+@pytest.mark.asyncio
+async def test_pitch_works_for_head_marketing() -> None:
+    hm_id = uuid4()
+    new_task = MagicMock(id=uuid4(), status="pending")
+    task_svc = AsyncMock()
+    task_svc.agent_for.return_value = MagicMock(role="head_marketing", team="board")
+    task_svc.create_pitch.return_value = new_task
+    deps = _make_deps(task=task_svc)
+    c = Choreographer(deps)
+
+    env = await c.pitch(hm_id, _pitch_inputs())
+
+    assert env.error is None
+    task_svc.create_pitch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pitch_blocks_disallowed_role() -> None:
+    dev_id = uuid4()
+    task_svc = AsyncMock()
+    task_svc.agent_for.return_value = MagicMock(role="developer", team="backend")
+    deps = _make_deps(task=task_svc)
+    c = Choreographer(deps)
+
+    env = await c.pitch(dev_id, _pitch_inputs())
+
+    body = env.as_dict()
+    assert body["error"] == "not_authorized"
+    assert "developer" in body["message"]
+    task_svc.create_pitch.assert_not_awaited()

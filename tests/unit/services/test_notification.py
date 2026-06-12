@@ -243,6 +243,40 @@ async def test_send_board_review_complete_notification(
 
 
 @pytest.mark.asyncio
+async def test_send_pitch_ready_notification(svc: NotificationService) -> None:
+    """A Board pitch surfaces to the CEO as an ack-required APPROVAL with a
+    product-greenlight subject carrying the task_id (Phase 4 — 4.E1)."""
+    aid = uuid4()
+    db = _FakeDb(agent_uuid=aid)
+    with _patch_db_context(db):
+        await svc.send_pitch_ready_notification(task_id="t1", title="Acme")
+    assert any("pitch awaiting approval" in row.subject for row in db.added)
+    assert any("Acme" in row.body for row in db.added)
+    assert any(row.type == NotificationType.APPROVAL for row in db.added)
+    assert any(row.priority == NotificationPriority.HIGH for row in db.added)
+    assert any(row.related_task_id == "t1" for row in db.added)
+
+
+@pytest.mark.asyncio
+async def test_send_pitch_provisioning_failed_notification(
+    svc: NotificationService,
+) -> None:
+    """A failed pitch provisioning surfaces to the CEO with the concrete reason
+    — never strands silently (Phase 4 — 4.E2, INTENT.md §11 #8)."""
+    aid = uuid4()
+    db = _FakeDb(agent_uuid=aid)
+    with _patch_db_context(db):
+        await svc.send_pitch_provisioning_failed_notification(
+            task_id="t1", reason="no github_org configured"
+        )
+    assert any("Pitch provisioning failed" in row.subject for row in db.added)
+    assert any("no github_org configured" in row.body for row in db.added)
+    assert any(row.type == NotificationType.BLOCKER_ESCALATION for row in db.added)
+    assert any(row.priority == NotificationPriority.HIGH for row in db.added)
+    assert any(row.related_task_id == "t1" for row in db.added)
+
+
+@pytest.mark.asyncio
 async def test_send_ack_notification(svc: NotificationService) -> None:
     aid = uuid4()
     db = _FakeDb(agent_uuid=aid)

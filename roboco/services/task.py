@@ -36,6 +36,7 @@ from roboco.models.base import (
     AgentRole,
     AgentStatus,
     BlockerResolverType,
+    Complexity,
     JournalEntryType,
     TaskNature,
     TaskStatus,
@@ -43,7 +44,7 @@ from roboco.models.base import (
     Team,
 )
 from roboco.models.permissions import AgentContext, TaskAction
-from roboco.models.task import TaskCreateRequest
+from roboco.models.task import PitchCreateRequest, TaskCreateRequest
 from roboco.models.work_session import WorkSessionStatus
 from roboco.seeds.initial_data import AGENT_UUIDS
 from roboco.services.base import (
@@ -592,6 +593,76 @@ class TaskService(BaseService):
             task_id=str(task.id),
             title=req.title,
             team=req.team if isinstance(req.team, str) else req.team.value,
+        )
+        return task
+
+    async def create_pitch(self, req: "PitchCreateRequest") -> TaskTable:
+        """Create a Board PITCH root task (Phase 4 — pitch → approve → provision).
+
+        A pitch is the company originating a *new product*: it precedes the
+        repo, so unlike :meth:`create` it carries NO ``project_id`` /
+        ``product_id`` — the provisioning path creates them on CEO approval.
+        The task is born in the exact state the CEO Approve & Start queue
+        surfaces (``status=PENDING`` + ``board_review_complete=True`` +
+        ``team=board``); greenlighting a new product line is gated, so it always
+        reaches the human. ``source='pitch'`` marks the row so the approval hook
+        (Track 4.E2) knows to provision rather than just hand to Main PM.
+
+        The structured content contract (objective / what_this_builds / the_work
+        / notes / rationale) is persisted verbatim under
+        ``proactive_context['pitch']`` so provisioning has machine-readable
+        access to the per-cell work and the success criteria, while the
+        human-readable rendering lives in ``description`` (composed by the
+        caller) + ``acceptance_criteria``.
+
+        The general ``create`` project/product invariant is intentionally NOT
+        applied here — bypassing it for any other path would recreate the
+        deadlocks that invariant guards against, so this is a dedicated method,
+        not a flag on ``create``.
+        """
+        pitch_metadata: dict[str, Any] = {
+            "objective": req.objective,
+            "what_this_builds": list(req.what_this_builds),
+            "the_work": list(req.the_work),
+            "notes": list(req.notes),
+            "rationale": req.rationale,
+            "acceptance_criteria": list(req.acceptance_criteria),
+        }
+        task = TaskTable(
+            title=req.title,
+            description=req.description,
+            acceptance_criteria=req.acceptance_criteria,
+            team=cast("Any", Team.BOARD),
+            created_by=req.created_by,
+            priority=req.priority,
+            status=TaskStatus.PENDING,
+            # Strategic / non-technical: pitches are product strategy, which is
+            # the Board's bucket (mirrors list_strategic_for_board's filter).
+            nature=cast("Any", TaskNature.NON_TECHNICAL),
+            task_type=cast("Any", TaskType.PLANNING),
+            estimated_complexity=cast("Any", Complexity.HIGH),
+            # No repo yet — provisioning creates project/product on approval.
+            project_id=None,
+            product_id=None,
+            # Born board-reviewed: the authoring Board roles ARE the board, so
+            # the pitch is queue-ready the moment it is authored.
+            board_review_complete=True,
+            source="pitch",
+            proactive_context={"pitch": pitch_metadata},
+        )
+        self.session.add(task)
+        await self.session.flush()
+
+        self.log.info(
+            "Pitch task created",
+            task_id=str(task.id),
+            title=req.title,
+            created_by=str(req.created_by),
+        )
+        await self._emit_task_event(
+            EventType.TASK_CREATED,
+            cast("UUID", task.id),
+            {"source": "pitch", "title": req.title},
         )
         return task
 
@@ -3895,6 +3966,17 @@ class TaskService(BaseService):
             self.log.error("approve_and_start - main-pm agent not found")
             return None
 
+        # Phase 4 (4.E2): a pitch approval is a product greenlight. Before
+        # handing to Main PM, provision the reality the pitch described — create
+        # the private repo(s), register the project/product, and seed delivery.
+        # This is autonomous (the CEO already said yes — INTENT.md §6). On
+        # failure we surface to the CEO and abort the handoff rather than
+        # stranding a half-approved pitch with no repo (INTENT.md §11 #8).
+        if getattr(task, "source", None) == "pitch" and not (
+            await self._provision_approved_pitch(task)
+        ):
+            return None
+
         already = task.assigned_to == main_pm.id
         task.assigned_to = cast("Any", main_pm.id)
         # The board-reviewed coordination task now belongs to Main PM, who will
@@ -3920,6 +4002,69 @@ class TaskService(BaseService):
             idempotent=already,
         )
         return task
+
+    async def _provision_approved_pitch(self, task: "TaskTable") -> bool:
+        """Provision an approved pitch (Phase 4 — 4.E2). True on success.
+
+        Invokes the pitch-provisioning service (create private repo(s),
+        register the project/product, seed delivery). Three outcomes:
+
+        * provisioned / skipped (idempotent) — success: return True and let the
+          caller hand the pitch task to Main PM.
+        * unavailable (``available=False``, e.g. no org/token configured) or a
+          raised GitHub/DB error — failure: surface a CEO notification with the
+          concrete reason and return False so the caller aborts the handoff,
+          leaving the pitch in the CEO queue to retry after the cause is fixed.
+
+        Provisioning is idempotent, so a later re-approval after a fixed cause
+        will not double-create. The CEO already approved, so this runs
+        autonomously (INTENT.md §6); the failure path exists only so a stranded
+        approval reaches the CEO instead of going silent (INTENT.md §11 #8).
+        """
+        from roboco.services.notification import NotificationService
+        from roboco.services.pitch_provisioning import (
+            get_pitch_provisioning_service,
+        )
+
+        task_id = cast("UUID", task.id)
+        created_by = cast("UUID", task.created_by)
+        reason: str | None
+        try:
+            result = await get_pitch_provisioning_service(self.session).provision_pitch(
+                task_id=task_id,
+                created_by=created_by,
+            )
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+            self.log.error(
+                "Pitch provisioning raised — surfacing to CEO",
+                task_id=str(task_id),
+                error=reason,
+            )
+        else:
+            if result.provisioned or result.skipped:
+                self.log.info(
+                    "Pitch provisioned on approval",
+                    task_id=str(task_id),
+                    skipped=result.skipped,
+                    product_id=str(result.product_id) if result.product_id else None,
+                    repos=len(result.repos),
+                    seeded=len(result.seeded_task_ids),
+                )
+                return True
+            # available=False (guard tripped): a clean, non-raised failure.
+            reason = result.reason or "provisioning unavailable"
+            self.log.warning(
+                "Pitch provisioning unavailable — surfacing to CEO",
+                task_id=str(task_id),
+                reason=reason,
+            )
+
+        await NotificationService().send_pitch_provisioning_failed_notification(
+            task_id=str(task_id),
+            reason=reason or "provisioning failed",
+        )
+        return False
 
     async def mark_board_review_complete(self, task_id: UUID) -> bool:
         """Flag a board task as board-reviewed without moving it off pending.

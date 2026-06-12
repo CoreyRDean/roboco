@@ -600,6 +600,11 @@ class AgentOrchestrator:
         # formal CEO notification per task. Tracks task_ids already notified so
         # the signal fires exactly once.
         self._board_review_ceo_notified: set[str] = set()
+        # Phase 4: pitches are born already board-reviewed (the authoring Board
+        # roles ARE the board), so they skip the two-reviewer dispatch above and
+        # need their own one-shot CEO notification. Tracks pitch task_ids already
+        # surfaced so the signal fires exactly once.
+        self._pitch_ceo_notified: set[str] = set()
         # Stale-claim reaper config, sourced from
         # stale_claim_reap_seconds (default 600) rather than
         # claim_stale_seconds (default 180). The two settings are now
@@ -5833,6 +5838,61 @@ Start now: evidence(task_id="{task_id}")
             task_id=task_id,
         )
 
+    async def _maybe_surface_pitch_to_ceo(self, task: dict[str, Any]) -> bool:
+        """Phase 4 (4.E1): surface a Board pitch to the CEO's Approve & Start gate.
+
+        A pitch (``source='pitch'``) is authored already board-reviewed
+        (``board_review_complete=True``, still ``pending``, ``team=board``), so
+        it is queue-ready the moment it exists — the panel's CEO action queue
+        already surfaces it on those fields. What it is missing is the actionable
+        signal: a pitch never went through the two-reviewer dispatch that backs
+        ``_maybe_handoff_board_review_to_ceo``, so no CEO notification fired. This
+        emits that one formal ack-required notification (greenlighting a new
+        product line is gated — INTENT.md §6) and tells the dispatcher to stop
+        handling the task (return True), keeping it pending for the CEO instead
+        of re-reviewing or routing it.
+
+        Fires at most once per pitch; a failure clears the guard so a later tick
+        retries, and never wedges the dispatch loop. Returns True for any pitch
+        the dispatcher should leave alone (whether or not the notification just
+        fired), so a pitch is never mistaken for routable board work.
+        """
+        if task.get("source") != "pitch":
+            return False
+        task_id = str(task.get("id"))
+        # Only intercept while it still awaits the CEO. Once approved,
+        # approve_and_start re-targets it to Main PM (team → main_pm); at that
+        # point it is normal PM work and must flow through the usual path.
+        if task.get("team") == Team.MAIN_PM.value or task.get("assigned_to"):
+            return False
+        if task_id in self._pitch_ceo_notified:
+            return True
+        self._pitch_ceo_notified.add(task_id)
+
+        from roboco.services.notification import NotificationService
+
+        try:
+            await NotificationService().send_pitch_ready_notification(
+                task_id=task_id,
+                title=task.get("title"),
+            )
+        except Exception as exc:
+            # Don't wedge dispatch on a failure; allow a retry by clearing the
+            # one-shot guard so a later tick can re-emit. Still return True — the
+            # task is a pitch and must not be re-reviewed/routed regardless.
+            self._pitch_ceo_notified.discard(task_id)
+            logger.warning(
+                "Failed to surface pitch to CEO",
+                task_id=task_id,
+                error=str(exc),
+            )
+            return True
+        logger.info(
+            "Pitch surfaced to CEO Approve & Start queue",
+            task_id=task_id,
+        )
+        return True
+
     def _pm_spawn_prompt(
         self, routing: str, agent_id: str, task: dict[str, Any]
     ) -> str:
@@ -5922,6 +5982,12 @@ Start now: evidence(task_id="{task_id}")
 
         for task in tasks:
             if self._is_task_handled_this_tick(task.get("id")):
+                continue
+            # Phase 4: a pitch is born board-reviewed and queue-ready (pending +
+            # board_review_complete + team=board). It must NOT go through board
+            # re-review or PM routing — it waits on the CEO's Approve & Start.
+            # Surface it to the CEO once, then leave it pending for the gate.
+            if await self._maybe_surface_pitch_to_ceo(task):
                 continue
             assigned_to = task.get("assigned_to")
             if assigned_to:

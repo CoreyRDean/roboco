@@ -330,6 +330,9 @@ export interface Task {
   pr_url: string | null;
   // RAG Context
   proactive_context?: Record<string, unknown> | null;
+  // Origin: "manual" | "prompter" | "pitch" — "pitch" marks a Board product
+  // proposal so the CEO queue renders its rationale (Phase 4).
+  source?: string;
 }
 
 export interface TaskCreate {

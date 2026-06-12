@@ -317,6 +317,11 @@ VERBS_WITHOUT_TRACING: frozenset[str] = frozenset(
         "claim_doc_task",
         # open_pr is a mechanical push+open; preconditions are inline.
         "open_pr",
+        # pitch originates a NEW root proposal task; the well-formed-pitch
+        # content contract (objective, the_work, success_criteria, rationale)
+        # is enforced at the schema boundary (api.schemas.v1.flow.PitchRequest),
+        # not via task-state tracing requirements.
+        "pitch",
     }
 )
 

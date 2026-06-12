@@ -151,6 +151,52 @@ class EscalateToCeoRequest(BaseModel):
     reason: str = Field(..., min_length=1)
 
 
+class PitchCellWork(BaseModel):
+    """One cell's slice of a pitch's work (the CellWork shape)."""
+
+    team: str = Field(..., min_length=1, description="backend | frontend | ux_ui")
+    summary: str = Field(..., min_length=1, description="One-line summary of the slice")
+    items: list[str] = Field(
+        default_factory=list, description="Concrete deliverables for this cell"
+    )
+
+
+class PitchRequest(BaseModel):
+    """HTTP body for the Board ``pitch`` verb (Phase 4).
+
+    The well-formed-pitch content contract: a credible bet, not a thought. The
+    structured fields mirror the intake draft shape so the pitch renders through
+    the same deterministic prose composition. A pitch carries NO project/product
+    — provisioning creates them on CEO approval — so there is no targeting field.
+    """
+
+    title: str = Field(..., min_length=1, max_length=200, description="The pitch name")
+    objective: str = Field(
+        ...,
+        min_length=1,
+        description="The objective this product serves (grounded in the goals)",
+    )
+    what_this_builds: list[str] = Field(
+        ..., min_length=1, description="Concrete artifacts the product would ship"
+    )
+    the_work: list[PitchCellWork] = Field(
+        ..., min_length=1, description="Per-cell breakdown; drives single vs multi-cell"
+    )
+    success_criteria: list[str] = Field(
+        ..., min_length=1, description="What 'this worked' looks like"
+    )
+    rationale: str = Field(
+        ...,
+        min_length=1,
+        description="Why now — the rationale, grounded in research",
+    )
+    notes: list[str] = Field(
+        default_factory=list,
+        description="Constraints, reuse pointers, things to confirm with the CEO",
+    )
+    priority: int = Field(default=2, ge=0, le=3)
+
+
 class IWillPlanRequest(BaseModel):
     task_id: UUID
     plan: str = Field(..., min_length=1)

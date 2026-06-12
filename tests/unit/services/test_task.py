@@ -8,6 +8,7 @@ session boundary and checks the method's contract.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -16,9 +17,13 @@ from roboco.models.base import (
     AgentRole,
     AgentStatus,
     BlockerResolverType,
+    TaskNature,
     TaskStatus,
+    TaskType,
     Team,
 )
+from roboco.models.task import PitchCreateRequest
+from roboco.services.pitch_provisioning import PitchProvisionResult
 from roboco.services.task import GatewayAgentView, TaskService
 
 
@@ -300,6 +305,178 @@ async def test_all_subtasks_terminal_true_when_no_subtasks() -> None:
     result.scalars.return_value = scalars
     svc = _service_with(result)
     assert await svc.all_subtasks_terminal(uuid4()) is True
+
+
+# ---------------------------------------------------------------------------
+# create_pitch (Phase 4 — Board product origination)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_pitch_builds_queue_ready_root_without_repo() -> None:
+    session = MagicMock()
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+    svc = TaskService(session)
+    _bind(svc, "_emit_task_event", AsyncMock())
+
+    req = PitchCreateRequest(
+        title="Solo Dev Workbench",
+        description="## Objective\n\nOne calm workbench for solo AI devs.",
+        acceptance_criteria=["A solo dev ships a project in under an hour"],
+        created_by=uuid4(),
+        objective="One calm workbench for solo AI devs.",
+        what_this_builds=["A web app"],
+        the_work=[{"team": "backend", "summary": "API", "items": ["endpoints"]}],
+        notes=["reuse auth"],
+        rationale="Research shows fragmented tooling.",
+    )
+    task = await svc.create_pitch(req)
+
+    session.add.assert_called_once_with(task)
+    session.flush.assert_awaited_once()
+    # Born in the exact state the CEO Approve & Start queue surfaces.
+    assert task.status == TaskStatus.PENDING
+    assert task.board_review_complete is True
+    assert task.team == Team.BOARD
+    assert task.source == "pitch"
+    # No repo yet — provisioning creates project/product on approval.
+    assert task.project_id is None
+    assert task.product_id is None
+    # Strategic / planning nature so it lands in the Board bucket.
+    assert task.nature == TaskNature.NON_TECHNICAL
+    assert task.task_type == TaskType.PLANNING
+    # The structured contract is carried for provisioning to consume.
+    assert task.proactive_context is not None
+    pitch = task.proactive_context["pitch"]
+    assert pitch["objective"] == "One calm workbench for solo AI devs."
+    assert pitch["the_work"][0]["team"] == "backend"
+    assert pitch["rationale"] == "Research shows fragmented tooling."
+    assert pitch["acceptance_criteria"] == [
+        "A solo dev ships a project in under an hour"
+    ]
+
+
+# ---------------------------------------------------------------------------
+# _provision_approved_pitch (Phase 4 — 4.E2: provision on CEO approval)
+# ---------------------------------------------------------------------------
+
+
+def _pitch_provision_result(**overrides: Any) -> PitchProvisionResult:
+    base: dict[str, Any] = {"provisioned": True}
+    base.update(overrides)
+    return PitchProvisionResult(**base)
+
+
+@pytest.mark.asyncio
+async def test_provision_approved_pitch_returns_true_on_success() -> None:
+    svc = TaskService(MagicMock())
+    task = _build_task(source="pitch", created_by=uuid4())
+    prov = MagicMock()
+    prov.provision_pitch = AsyncMock(
+        return_value=_pitch_provision_result(provisioned=True, product_id=uuid4())
+    )
+    notif = MagicMock()
+    notif.send_pitch_provisioning_failed_notification = AsyncMock()
+    with (
+        patch(
+            "roboco.services.pitch_provisioning.get_pitch_provisioning_service",
+            return_value=prov,
+        ),
+        patch(
+            "roboco.services.notification.NotificationService",
+            return_value=notif,
+        ),
+    ):
+        ok = await svc._provision_approved_pitch(task)
+    assert ok is True
+    notif.send_pitch_provisioning_failed_notification.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_provision_approved_pitch_treats_skipped_as_success() -> None:
+    """An idempotent re-provision (skipped) is success — the repo already
+    exists, so the handoff should proceed, not surface a failure."""
+    svc = TaskService(MagicMock())
+    task = _build_task(source="pitch", created_by=uuid4())
+    prov = MagicMock()
+    prov.provision_pitch = AsyncMock(
+        return_value=_pitch_provision_result(provisioned=False, skipped=True)
+    )
+    notif = MagicMock()
+    notif.send_pitch_provisioning_failed_notification = AsyncMock()
+    with (
+        patch(
+            "roboco.services.pitch_provisioning.get_pitch_provisioning_service",
+            return_value=prov,
+        ),
+        patch(
+            "roboco.services.notification.NotificationService",
+            return_value=notif,
+        ),
+    ):
+        ok = await svc._provision_approved_pitch(task)
+    assert ok is True
+    notif.send_pitch_provisioning_failed_notification.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_provision_approved_pitch_surfaces_unavailable() -> None:
+    """No org/token configured (available=False) — surface to CEO, return False
+    so the caller aborts the handoff rather than stranding the pitch."""
+    svc = TaskService(MagicMock())
+    task = _build_task(source="pitch", created_by=uuid4())
+    prov = MagicMock()
+    prov.provision_pitch = AsyncMock(
+        return_value=_pitch_provision_result(
+            provisioned=False,
+            available=False,
+            reason="no github_org configured",
+        )
+    )
+    notif = MagicMock()
+    notif.send_pitch_provisioning_failed_notification = AsyncMock()
+    with (
+        patch(
+            "roboco.services.pitch_provisioning.get_pitch_provisioning_service",
+            return_value=prov,
+        ),
+        patch(
+            "roboco.services.notification.NotificationService",
+            return_value=notif,
+        ),
+    ):
+        ok = await svc._provision_approved_pitch(task)
+    assert ok is False
+    notif.send_pitch_provisioning_failed_notification.assert_awaited_once()
+    _, kwargs = notif.send_pitch_provisioning_failed_notification.call_args
+    assert "no github_org configured" in kwargs["reason"]
+
+
+@pytest.mark.asyncio
+async def test_provision_approved_pitch_surfaces_raised_error() -> None:
+    """A raised GitHub/DB error is surfaced to the CEO, not swallowed."""
+    svc = TaskService(MagicMock())
+    task = _build_task(source="pitch", created_by=uuid4())
+    prov = MagicMock()
+    prov.provision_pitch = AsyncMock(side_effect=RuntimeError("github 500"))
+    notif = MagicMock()
+    notif.send_pitch_provisioning_failed_notification = AsyncMock()
+    with (
+        patch(
+            "roboco.services.pitch_provisioning.get_pitch_provisioning_service",
+            return_value=prov,
+        ),
+        patch(
+            "roboco.services.notification.NotificationService",
+            return_value=notif,
+        ),
+    ):
+        ok = await svc._provision_approved_pitch(task)
+    assert ok is False
+    notif.send_pitch_provisioning_failed_notification.assert_awaited_once()
+    _, kwargs = notif.send_pitch_provisioning_failed_notification.call_args
+    assert "github 500" in kwargs["reason"]
 
 
 # ---------------------------------------------------------------------------
