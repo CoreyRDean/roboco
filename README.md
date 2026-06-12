@@ -97,20 +97,106 @@ roboco/
 
 ## Quick Start
 
+There are two ways to run RoboCo: the **full Docker stack** (everything in
+containers, including the control panel and the agent runtime — this is the
+"get it all running" path), or **local dev** (infra in Docker, orchestrator on
+the host) for working on the Python code.
+
+### Option A — Full stack (Docker)
+
+**Prerequisites**
+
+- Docker + Docker Compose
+- **Claude Code CLI authenticated on the host.** Spawned agents reuse your
+  `~/.claude` credentials (mounted into each container) — there are no API keys
+  in `.env`. Authenticate once:
+  ```bash
+  npm install -g @anthropic-ai/claude-code
+  claude   # log in via browser; creates ~/.claude
+  ```
+
+**1. Create `.env` and set the two required secrets.** Compose **fails fast and
+will not start** without these (they are guarded with `:?` in
+`docker-compose.yml`), and `.env.example` ships them blank:
+
+```bash
+cp .env.example .env
+
+# Fernet key for encrypting secrets at rest (GitHub PATs, etc.):
+python3 -c 'import os,base64; print("ROBOCO_ENCRYPTION_KEY="+base64.urlsafe_b64encode(os.urandom(32)).decode())' >> .env
+
+# HMAC secret that signs per-agent auth tokens:
+python3 -c 'import secrets; print("ROBOCO_AGENT_AUTH_SECRET="+secrets.token_hex(32))' >> .env
+```
+
+**2. Point the host paths at *this* machine.** The defaults in `.env.example`
+target a NAS (`/volume1/roboco`, `/home/renzof/.claude`). The orchestrator uses
+these absolute host paths to bind-mount files into the agent containers it
+spawns, so they must be real paths on your machine (e.g. on macOS / a local
+checkout):
+
+```bash
+ROBOCO_HOST_PROJECT_DIR=/absolute/path/to/roboco   # this repo's checkout
+ROBOCO_HOST_DATA_DIR=/absolute/path/to/roboco/data
+CLAUDE_AUTH_DIR=/Users/you/.claude                 # your real ~/.claude
+ROBOCO_DATA_DIR=./data
+```
+
+**3. Build the images — base first.** The agent images are `FROM
+roboco-agent-base`, and **they must be pre-built**: the orchestrator cannot
+build them on-demand from inside its own container (it would fail with
+`unable to prepare context: path ... not found`), so spawning the intake agent
+or any cell agent requires the images to already exist. A plain parallel
+`docker compose build` can race and fail with `roboco-agent-base: not found`;
+build the base first if so:
+
+```bash
+docker compose build agent-base-image   # tag the base image first
+docker compose build                    # then the orchestrator, panel, and all agent-*-image services
+```
+
+**4. Start everything.** Database migrations run **automatically** on
+orchestrator startup (no manual `alembic upgrade` needed):
+
+```bash
+docker compose up -d
+docker compose logs -f orchestrator     # watch it come up; /health flips to 200 when ready
+```
+
+**5. Open the control panel:** **http://localhost:3000** (nginx is the single
+entry point — it proxies `/api` and `/ws` to the orchestrator and everything
+else to the Next.js panel).
+
+> [!NOTE]
+> The default LLM `glm-5:cloud` is an Ollama **cloud** model and needs an
+> `OLLAMA_API_KEY` for HyDE query-expansion. RAG **embeddings** run on the local
+> `qwen3-embedding:0.6b` model and work without it; the cloud LLM path degrades
+> gracefully (RAG features are disabled, the rest of the system runs normally).
+
+> [!NOTE]
+> No agents are spawned automatically — the system boots idle. The intake agent
+> starts when you open a chat in the panel; cell agents are spawned by the
+> orchestrator as tasks flow. To preseed agents at boot, uncomment the
+> `command: ["--spawn", ...]` line in `docker-compose.yml`.
+
+### Option B — Local dev (host)
+
+For working on the Python code with the orchestrator running on the host:
+
 ```bash
 # Install dependencies
 uv sync
 
-# Start PostgreSQL and Redis (Docker)
-docker compose up -d
+# Start only the infrastructure (PostgreSQL + Redis) in Docker
+make infra            # == docker compose up -d postgres redis
 
 # Run database migrations
 uv run alembic upgrade head
 
-# Start the API server
+# Start the API + orchestrator
 uv run python -m roboco.cli
 
-# Or just the API without orchestrator
+# Or just the API without the orchestrator
 uv run uvicorn roboco.api.app:app --reload --host 0.0.0.0 --port 8000
 ```
 
