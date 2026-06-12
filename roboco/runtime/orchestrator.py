@@ -1396,11 +1396,14 @@ class AgentOrchestrator:
         await self._ensure_agent_image(agent_id)
         mcp_config_path = await self._generate_mcp_config(agent_id, git_context)
 
+        from uuid import uuid4
+
         config = AgentConfig(
             agent_id=agent_id,
             blueprint_path=blueprint_path,
             model=model,
             mcp_config_path=mcp_config_path,
+            claude_session_id=str(uuid4()),
             git_context=git_context,
             briefing_path=briefing_path,
             provider_type=route.provider_type.value,
@@ -1804,25 +1807,28 @@ class AgentOrchestrator:
         `_get_role_permissions`), so this is purely about loading vs
         denying.
         """
-        cmd.extend(
-            [
-                get_agent_image(config.agent_id),
-                "--model",
-                cls._resolve_cli_model(config),
-                "--system-prompt-file",
-                "/app/system-prompt.md",
-                "--mcp-config",
-                "/app/mcp-config.json",
-                "--strict-mcp-config",
-                "--tools",
-                "Read,Write,Edit,Bash,Grep,Glob,Task,TodoWrite",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "-p",
-                initial_prompt or cls._default_spawn_prompt(),
-            ]
-        )
+        claude_args = [
+            get_agent_image(config.agent_id),
+            "--model",
+            cls._resolve_cli_model(config),
+            "--system-prompt-file",
+            "/app/system-prompt.md",
+            "--mcp-config",
+            "/app/mcp-config.json",
+            "--strict-mcp-config",
+            "--tools",
+            "Read,Write,Edit,Bash,Grep,Glob,Task,TodoWrite",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ]
+        # Pin the Claude session id so the agent's transcript is locatable by id
+        # at finalize, regardless of which project/cwd dir Claude Code writes it
+        # to (review/coordinate roles run at /app, not a per-agent workspace).
+        if config.claude_session_id:
+            claude_args += ["--session-id", config.claude_session_id]
+        claude_args += ["-p", initial_prompt or cls._default_spawn_prompt()]
+        cmd.extend(claude_args)
 
     @staticmethod
     def _resolve_cli_model(config: AgentConfig) -> str:
@@ -3207,21 +3213,37 @@ class AgentOrchestrator:
             )
             return None
 
-    @staticmethod
-    def _usage_from_transcript(agent_id: str) -> tuple[int, int, int, int]:
-        """Sum token usage from the agent's newest Claude Code transcript.
+    def _claude_session_id_for(self, agent_id: str) -> str | None:
+        """The orchestrator-assigned Claude session id for a running agent."""
+        instance = self._instances.get(agent_id)
+        return (
+            instance.config.claude_session_id if instance and instance.config else None
+        )
 
-        The host ``~/.claude`` is mounted into the orchestrator, so each agent's
-        transcripts are readable here under ``projects/*-{slug}/`` (Claude Code
-        encodes the agent's workspace cwd into the dir name, which ends in the
-        agent slug). The durable fallback for the live SDK ``/usage/status``
-        fetch, which misses whenever the agent container is short-lived or
-        already torn down. Returns zeros when no transcript is found.
+    @staticmethod
+    def _usage_from_transcript(
+        agent_id: str, claude_session_id: str | None = None
+    ) -> tuple[int, int, int, int]:
+        """Sum token usage from the agent's Claude Code transcript.
+
+        The host ``~/.claude`` is mounted into the orchestrator, so transcripts
+        are readable here under ``projects/<cwd-dir>/<session-id>.jsonl``. When
+        the orchestrator-assigned ``claude_session_id`` is known we locate the
+        exact transcript by id across ANY project dir — review/coordinate roles
+        run at cwd ``/app`` so theirs lands in ``projects/-app``, not in a
+        per-agent ``projects/*-{slug}`` dir. Without an id we fall back to the
+        newest transcript in the agent's own workspace dir. Durable fallback for
+        the live SDK ``/usage/status`` fetch, which misses for short-lived or
+        torn-down agents. Returns zeros when no transcript is found.
         """
         from roboco.agent_sdk.transcript_usage import sum_transcript_usage
 
         projects = Path.home() / ".claude" / "projects"
         try:
+            if claude_session_id:
+                by_id = list(projects.glob(f"*/{claude_session_id}.jsonl"))
+                if by_id:
+                    return sum_transcript_usage(by_id[0])
             jsonl = [
                 f
                 for d in projects.glob(f"*-{agent_id}")
@@ -3267,7 +3289,9 @@ class AgentOrchestrator:
             )
 
         if not tokens[0] and not tokens[1]:
-            tin, tout, cr, cw = self._usage_from_transcript(agent_id)
+            tin, tout, cr, cw = self._usage_from_transcript(
+                agent_id, self._claude_session_id_for(agent_id)
+            )
             if tin or tout:
                 tokens = (tin, tout, cr, cw)
         return tokens
@@ -3403,7 +3427,9 @@ class AgentOrchestrator:
         tokens = await self._fetch_agent_tokens(client, agent_id)
         if tokens is not None:
             return tokens
-        transcript = self._usage_from_transcript(agent_id)
+        transcript = self._usage_from_transcript(
+            agent_id, self._claude_session_id_for(agent_id)
+        )
         return transcript if any(transcript) else None
 
     @staticmethod

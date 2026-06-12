@@ -19,6 +19,7 @@ Coverage:
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -648,3 +649,65 @@ async def test_resolve_active_tokens_prefers_sdk() -> None:
 
     assert tokens == (10, 20, 0, 0)
     mock_tx.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _usage_from_transcript — locate by session id across any project dir
+# ---------------------------------------------------------------------------
+
+
+def test_usage_from_transcript_finds_by_session_id_in_shared_app_dir(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A session id locates the transcript even in the shared -app dir.
+
+    Review/coordinate roles run at cwd /app, so their transcript lands in
+    projects/-app, not a per-agent projects/*-{slug} dir. The session id finds
+    it regardless; the slug glob (no *-main-pm dir here) would return zeros.
+    """
+    app_dir = tmp_path / ".claude" / "projects" / "-app"
+    app_dir.mkdir(parents=True)
+    sid = "11111111-1111-1111-1111-111111111111"
+    exp_in, exp_out, exp_cr, exp_cw = 12, 34, 5, 6
+    line = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "id": "m1",
+                "usage": {
+                    "input_tokens": exp_in,
+                    "output_tokens": exp_out,
+                    "cache_read_input_tokens": exp_cr,
+                    "cache_creation_input_tokens": exp_cw,
+                },
+            },
+        }
+    )
+    (app_dir / f"{sid}.jsonl").write_text(line + "\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    result = AgentOrchestrator._usage_from_transcript("main-pm", sid)
+    assert result == (exp_in, exp_out, exp_cr, exp_cw)
+
+
+def test_usage_from_transcript_without_session_id_uses_slug_glob(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Without a session id it still finds the agent's own workspace transcript."""
+    slug_dir = tmp_path / ".claude" / "projects" / "-data-ws-roboco-backend-be-dev-1"
+    slug_dir.mkdir(parents=True)
+    exp_in, exp_out = 7, 8
+    line = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "id": "m1",
+                "usage": {"input_tokens": exp_in, "output_tokens": exp_out},
+            },
+        }
+    )
+    (slug_dir / "sess.jsonl").write_text(line + "\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    result = AgentOrchestrator._usage_from_transcript("be-dev-1")
+    assert result == (exp_in, exp_out, 0, 0)

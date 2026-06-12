@@ -41,6 +41,10 @@ class OrchestratorAgentConfig:
     model: str = "sonnet"  # sonnet, opus, haiku, or any ollama-cloud tag
     mcp_config_path: Path | None = None
     working_directory: Path | None = None
+    # Orchestrator-assigned Claude Code session id (passed to the agent CLI as
+    # --session-id) so the agent's transcript can be located by id at finalize,
+    # regardless of which project/cwd dir Claude Code writes it to.
+    claude_session_id: str | None = None
     # Git context for tasks requiring git workflow
     git_context: SpawnGitContext | None = None
     # Pre-rendered SessionStart briefing mounted as /app/briefing.md
