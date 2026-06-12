@@ -260,6 +260,71 @@ class SecretaryService(BaseService):
             "generated_at": datetime.now(UTC).isoformat(),
         }
 
+    async def cockpit_summary(self) -> dict:
+        """Derived cockpit state (6.B1): "Is the business winning?" at a glance.
+
+        Composed read-only from what already exists — no new measurement
+        machinery: per-objective proxy progress and goal-coverage from the
+        ``_drift_signals`` the digest already uses, spend-vs-budget from
+        ``_spend_vs_budget`` (``UsageService`` projection vs the budget cap), and
+        active-products-vs-cap from ``ProductService`` (every registered product
+        counts as active — the same rule the strategy-cap gate enforces).
+
+        Honest boundary (spec §"On winning"): there is no objective->task linkage
+        in the data model, so per-objective progress is not a stored percentage —
+        it is the coverage proxy the work engine itself uses. ``basis="proxy"``
+        marks the whole summary as proxy until real external launches greenlit.
+        """
+        from roboco.services.product import get_product_service
+
+        goals = await self._goals()
+        drift = await self._drift_signals(goals)
+        spend = await self._spend_vs_budget()
+        policy = OperatingPolicy.model_validate(goals.operating_policy)
+
+        # Per-objective proxy progress. Active objectives first (lower priority
+        # value == higher priority), mirroring the strategy engine's ordering.
+        # ``has_work_behind_it`` is the company-wide coverage proxy: there is no
+        # per-objective task linkage today, so an objective is "covered" iff any
+        # work is in flight at all (the same proxy `_strategy_assess` relies on).
+        objectives = [Objective.model_validate(o) for o in goals.objectives]
+        active = sorted(
+            (o for o in objectives if o.status.value == "active"),
+            key=lambda o: o.priority,
+        )
+        has_work = drift["in_flight_tasks"] > 0
+        objective_items = [
+            {
+                "title": o.title,
+                "priority": o.priority,
+                "metric": o.metric,
+                "target": o.target,
+                "horizon": o.horizon,
+                "has_work_behind_it": has_work,
+            }
+            for o in active
+        ]
+
+        # Active products vs cap. Products are not status-scoped, so every
+        # registered product counts as active — identical to the orchestrator's
+        # `_strategy_caps_ok`, so the cockpit and the gate agree on the number.
+        products = await get_product_service(self.session).list_all(limit=1000)
+        active_products = len(products)
+        max_products = int(policy.max_active_products)
+
+        return {
+            "basis": "proxy",
+            "objectives": objective_items,
+            "goal_coverage": drift,
+            "spend": spend,
+            "products": {
+                "active_products": active_products,
+                "max_active_products": max_products,
+                "at_cap": active_products >= max_products,
+            },
+            "generated_at": datetime.now(UTC).isoformat(),
+        }
+
     async def proactive_digest(self) -> dict:
         """The proactive-feed data source (3.A2): "what needs the CEO".
 

@@ -9,6 +9,7 @@ import { ActiveBlockersPanel } from "./active-blockers-panel";
 import { RecentActivityFeed } from "./recent-activity-feed";
 import { QuickActionsBar } from "./quick-actions-bar";
 import { CeoApprovalQueue } from "./ceo-approval-queue";
+import { PerformanceView, DriftSignal, StallSignal } from "./performance-view";
 import type { Activity } from "./activity-item";
 import { Button } from "@/components/ui/button";
 import { UsageOverviewPanel } from "./usage-overview-panel";
@@ -48,6 +49,28 @@ export function CommandCenter() {
         </div>
       </div>
 
+      {/* CEO Approval Queue — the focal point: what needs the CEO, top of the
+          overview so a gated decision is impossible to miss (6.C2). */}
+      <section>
+        <CeoApprovalQueue />
+      </section>
+
+      {/* Drift & stall signals — surfaced above the fold, not buried (6.C3).
+          Each renders only when it has something to say. */}
+      <DriftSignal />
+      <StallSignal tasks={tasks} />
+
+      {/* Performance — "Is the business winning?" proxy metrics (6.C1). */}
+      <section>
+        <h2 className="text-lg font-semibold mb-4">
+          Performance{" "}
+          <span className="text-sm font-normal text-muted-foreground">
+            (proxy until external launch)
+          </span>
+        </h2>
+        <PerformanceView />
+      </section>
+
       {/* Team Health */}
       <section>
         <h2 className="text-lg font-semibold mb-4">Team Health</h2>
@@ -55,11 +78,6 @@ export function CommandCenter() {
           teams={overview?.health_status}
           isLoading={loadingOverview}
         />
-      </section>
-
-      {/* CEO Approval Queue - Your primary action item */}
-      <section>
-        <CeoApprovalQueue />
       </section>
 
       {/* Metrics, Alerts, and Usage Row */}

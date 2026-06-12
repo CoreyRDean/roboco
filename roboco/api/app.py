@@ -18,6 +18,7 @@ from roboco.api.routes.a2a import wellknown_router as a2a_wellknown_router
 from roboco.api.routes.agents import router as agents_router
 from roboco.api.routes.business_goals import router as business_goals_router
 from roboco.api.routes.channels import router as channels_router
+from roboco.api.routes.cockpit import router as cockpit_router
 from roboco.api.routes.dashboard import router as dashboard_router
 from roboco.api.routes.docs import router as docs_router
 from roboco.api.routes.git import router as git_router
@@ -343,6 +344,13 @@ def create_app() -> FastAPI:
         secretary_router,
         prefix=f"{api_prefix}/secretary",
         tags=["Secretary"],
+    )
+
+    # Cockpit — the CEO watch-surface derived state ("Is the business winning?")
+    app.include_router(
+        cockpit_router,
+        prefix=f"{api_prefix}/cockpit",
+        tags=["Cockpit"],
     )
 
     # Work Sessions
