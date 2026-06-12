@@ -212,6 +212,37 @@ class AssignmentScope(StrEnum):
     AGENT_SLUG = "agent_slug"
 
 
+class AutonomyLevel(StrEnum):
+    """How much the company may do without CEO approval (the leash).
+
+    See INTENT.md §6 — gated autonomy is the default posture.
+    """
+
+    PROPOSE_ONLY = "propose_only"  # surface everything; act on nothing
+    GATED = "gated"  # autonomous between approvals; gate-list trips to CEO
+    FULL = "full"  # act freely within caps; least supervision
+
+
+class ObjectiveStatus(StrEnum):
+    """Lifecycle state of a single business objective."""
+
+    ACTIVE = "active"
+    ACHIEVED = "achieved"
+    PAUSED = "paused"
+    DROPPED = "dropped"
+
+
+class StrategyCadence(StrEnum):
+    """How often the company runs a strategy cycle.
+
+    ``OFF`` is human-triggered only; the others run on a schedule.
+    """
+
+    OFF = "off"
+    DAILY = "daily"
+    WEEKLY = "weekly"
+
+
 # =============================================================================
 # BASE MODEL
 # =============================================================================

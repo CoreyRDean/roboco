@@ -46,6 +46,10 @@ class BriefingInputs:
     # respawned agent picks up where the previous worker left off instead of
     # re-exploring the codebase from cold.
     task_handoff: dict[str, Any] | None = None
+    # Compact Business Goals payload (north star + active objectives + gate list
+    # + caps) injected so every agent orients its work to the company charter
+    # (INTENT.md §9). None until the charter is wired in / on error-only paths.
+    company_goals: dict[str, Any] | None = None
 
 
 def build_evidence_for_task(
@@ -132,4 +136,34 @@ def build_context_briefing(inputs: BriefingInputs) -> dict[str, Any]:
         "recent_team_activity": inputs.recent_team_activity[:BRIEFING_LIST_CAP],
         "blockers_in_my_lane": inputs.blockers_in_my_lane[:BRIEFING_LIST_CAP],
         "task_handoff": inputs.task_handoff,
+        "company_goals": inputs.company_goals,
+    }
+
+
+def build_company_goals(goals: Any) -> dict[str, Any] | None:
+    """Compose a compact Business Goals payload for an agent briefing.
+
+    Carries only what orients work: the north star, the active objectives, the
+    constraints, and the operating-policy leash (gate list + caps + autonomy).
+    Pure + defensive — degrades a missing/oddly-shaped field to a safe default
+    rather than leaking a non-JSON object or raising. Returns ``None`` only when
+    there is no charter row at all.
+    """
+    if goals is None:
+        return None
+    policy = _typed(getattr(goals, "operating_policy", None), dict, {})
+    objectives = _typed(getattr(goals, "objectives", None), list, [])
+    active = [
+        o
+        for o in objectives
+        if isinstance(o, dict) and o.get("status", "active") == "active"
+    ]
+    return {
+        "north_star": _typed(getattr(goals, "north_star", None), str, ""),
+        "active_objectives": active[:BRIEFING_LIST_CAP],
+        "constraints": _typed(getattr(goals, "constraints", None), list, []),
+        "autonomy_level": policy.get("autonomy_level"),
+        "gate_list": _typed(policy.get("gate_list"), list, []),
+        "monthly_budget_usd": policy.get("monthly_budget_usd"),
+        "max_active_products": policy.get("max_active_products"),
     }

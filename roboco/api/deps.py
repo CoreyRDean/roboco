@@ -24,6 +24,7 @@ from roboco.models import AgentRole, Team
 from roboco.runtime import AgentOrchestrator
 from roboco.services.a2a import A2AService
 from roboco.services.audit import get_audit_service
+from roboco.services.business_goals import BusinessGoalsService
 from roboco.services.gateway.choreographer import Choreographer, ChoreographerDeps
 from roboco.services.gateway.content_actions import ContentActions, ContentActionsDeps
 from roboco.services.gateway.evidence_repo import EvidenceRepo
@@ -526,6 +527,7 @@ async def get_choreographer(
             product=ProductService(db_session),
             orchestrator=orch,
             stream_bus=bus,
+            business_goals=BusinessGoalsService(db_session),
         )
     )
 

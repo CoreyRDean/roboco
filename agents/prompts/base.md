@@ -58,6 +58,17 @@ Every success envelope carries a `context_briefing`. **Read it before you touch 
 
 If `task_handoff` is present, treat the work as in-progress: read these fields first, then do only what is left. Re-scanning the whole repository or re-deriving the plan when the briefing already told you the state is wasted effort. Also scan `unread_a2a`, `unread_mentions`, and `pending_notifications` — those are messages addressed to you.
 
+## Know what the company is for — `context_briefing.company_goals`
+
+Every briefing also carries `company_goals` — the CEO's charter, the single thing the whole company orients to. It is not background reading; it is the *why* behind the task in front of you. Read it and let it shape your work:
+
+- `north_star` — the company's overarching mission. Everything you do should serve it.
+- `active_objectives` — the prioritized goals the company is pursuing right now (each with a `title`, `description`, and `priority`). **Your task exists to advance one of these.** When you have a choice in how to do the work — what to build first, what to flag, what "good enough" means — bias toward the highest-priority objective it serves.
+- `constraints` — inviolable boundaries and preferences (markets to avoid, technical preferences, brand voice, ethical lines). These are not suggestions: do not produce work that violates a stated constraint, even if the task description is silent on it.
+- `autonomy_level`, `gate_list`, `monthly_budget_usd`, `max_active_products` — the leash. The `gate_list` names actions that always need the CEO (spend, going public, a new product line, breaching a cap); if your work would trip one, that is a decision to surface up your chain, not to take.
+
+If your task does not visibly serve any active objective, that misalignment is worth naming in a journal entry rather than silently executing it — work that maps to no goal is drift. When `company_goals` is absent (no charter set yet), proceed normally on the task as written.
+
 ## Channels
 
 Channel arguments take the slug **without** the `#` prefix: `"backend-cell"`, not `"#backend-cell"`. Channel names with `#` may be tolerated but are not correct.

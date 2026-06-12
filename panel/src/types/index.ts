@@ -116,6 +116,26 @@ export enum SessionTaskRelationshipType {
   RETROSPECTIVE = "retrospective",
 }
 
+// Business Goals enums (matching backend models/base.py)
+export enum AutonomyLevel {
+  PROPOSE_ONLY = "propose_only", // surface everything; act on nothing
+  GATED = "gated", // autonomous between approvals; gate-list trips to CEO
+  FULL = "full", // act freely within caps; least supervision
+}
+
+export enum ObjectiveStatus {
+  ACTIVE = "active",
+  ACHIEVED = "achieved",
+  PAUSED = "paused",
+  DROPPED = "dropped",
+}
+
+export enum StrategyCadence {
+  OFF = "off", // human-triggered only
+  DAILY = "daily",
+  WEEKLY = "weekly",
+}
+
 export enum NotificationType {
   TASK_ASSIGNMENT = "task_assignment",
   PRIORITY_CHANGE = "priority_change",
@@ -1195,6 +1215,53 @@ export interface ProductUpdate {
   name?: string;
   description?: string;
   cells?: ProductCellMapping[];
+}
+
+// =============================================================================
+// BUSINESS GOALS (the single CEO-editable charter — INTENT.md §9)
+// Mirrors backend roboco/models/business_goals.py
+// =============================================================================
+
+export interface Objective {
+  title: string;
+  description: string | null;
+  metric: string | null;
+  target: string | null;
+  horizon: string | null;
+  priority: number;
+  status: ObjectiveStatus;
+}
+
+export interface ProvisioningPolicy {
+  github_org: string | null;
+  default_repo_visibility: string;
+  naming: string | null;
+}
+
+export interface OperatingPolicy {
+  autonomy_level: AutonomyLevel;
+  gate_list: string[];
+  monthly_budget_usd: number;
+  max_active_products: number;
+  strategy_cadence: StrategyCadence;
+  provisioning: ProvisioningPolicy;
+}
+
+export interface BusinessGoals {
+  id: string;
+  north_star: string;
+  objectives: Objective[];
+  operating_policy: OperatingPolicy;
+  constraints: string[];
+  created_at: string;
+  updated_at: string | null;
+}
+
+export interface BusinessGoalsUpdate {
+  north_star?: string;
+  objectives?: Objective[];
+  operating_policy?: OperatingPolicy;
+  constraints?: string[];
 }
 
 export interface WorkSession {
