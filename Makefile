@@ -50,6 +50,21 @@ infra-down:
 	@echo "Stopping infrastructure..."
 	@docker compose down
 
+# Rebuild the agent container images IN ORDER: base first (it carries the roboco
+# source), then the specialized images that are FROM it. Rebuilding only a
+# specialized image inherits stale source — always base-then-specialized. Run
+# this after ANY agent-side change (roboco/agent_sdk, roboco/mcp, role_config,
+# prompts that get baked, etc.); rebuilding only orchestrator/panel does NOT
+# update agents. Running containers keep their old image until re-spawned.
+.PHONY: agent-images
+agent-images:
+	@echo "Building agent-base (source layer)..."
+	@docker compose build agent-base-image
+	@echo "Building specialized agent images..."
+	@docker compose build agent-prompter-image agent-pm-image agent-dev-be-image \
+		agent-dev-fe-image agent-qa-be-image agent-qa-fe-image agent-doc-image agent-ux-image
+	@echo "Agent images rebuilt. Re-spawn agents (e.g. start a fresh Secretary chat) to pick them up."
+
 # Run database migrations
 .PHONY: migrate
 migrate:
@@ -408,6 +423,7 @@ help:
 	@echo "Infrastructure:"
 	@echo "  make infra                    - Start PostgreSQL + Redis"
 	@echo "  make infra-down               - Stop infrastructure"
+	@echo "  make agent-images             - Rebuild agent images (base-then-specialized; after agent-side changes)"
 	@echo "  make migrate                  - Run database migrations"
 	@echo "  make migration                - Create new migration"
 	@echo "  make db-init                  - Initialize/seed database"
